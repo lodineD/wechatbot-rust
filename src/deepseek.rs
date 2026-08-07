@@ -11,6 +11,13 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tracing::{info, warn};
 
+/// 用户意图：要么搜索，要么抓取页面，要么不需要任何操作。
+enum Intent {
+    Search(String),
+    Fetch(String),
+    None,
+}
+
 #[derive(Clone)]
 pub struct DeepseekClient {
     token: Arc<String>,
@@ -44,13 +51,16 @@ impl DeepseekClient {
                 if self.web_search_enabled {
                     hist.push(Message::new(
                         Role::System,
-                        "\n\n[系统能力] 你具备联网搜索能力。当用户提问涉及实时信息、新闻、最新数据、不确定的事实等需要联网获取的内容时，\
+                        "\n\n[系统能力] 你具备以下能力：\n\n\
+                         1. **联网搜索**：当用户提问涉及实时信息、新闻、最新数据、不确定的事实等需要联网获取的内容时，\
                          你必须在回复中严格按照以下格式输出搜索请求：\n[SEARCH:搜索关键词]\n\n\
+                         2. **网页内容抓取**：当用户给你一个链接让你查看内容时，\
+                         你必须在回复中严格按照以下格式输出抓取请求：\n[FETCH:完整URL]\n\n\
                          注意：\n\
-                         1. 你的回复只需要包含搜索关键词，不需要多余的解释。\n\
-                         2. 当你看到系统注入的「以下是搜索结果」内容后，必须直接基于搜索结果给出最终回答，\
-                         不要再输出 [SEARCH:...] 标记。\n\
-                         3. 如果不需要搜索，直接正常回复即可。",
+                         - 你的回复只需要包含上述标记，不需要多余的解释。\n\
+                         - 当你看到系统注入的「以下是搜索结果」或「以下是页面内容」后，\
+                         必须直接基于这些信息给出最终回答，不要再输出标记。\n\
+                         - 如果不需要搜索或抓取，直接正常回复即可。",
                     ));
                 }
                 Arc::new(Mutex::new(hist))
@@ -59,10 +69,7 @@ impl DeepseekClient {
             .clone()
     }
 
-    /// 流式聊天（含自动联网搜索）。
-    ///
-    /// 支持多层搜索：若模型在搜索后仍输出 `[SEARCH:...]`，会继续搜索，
-    /// 最多 `max_search_rounds` 轮，避免死循环。
+    /// 流式聊天（含自动联网搜索和页面抓取）。
     pub async fn chat_stream<F>(
         &self,
         session_key: &str,
@@ -76,93 +83,125 @@ impl DeepseekClient {
         let mut hist = history.lock().await;
         hist.push(Message::new(Role::User, prompt));
 
-        // 第一轮：静默收集，检查是否需要搜索
         let mut final_reply = self.stream_silent(&mut hist).await?;
 
-        // 最多进行 max_search_rounds 轮搜索
-        const MAX_SEARCH_ROUNDS: usize = 3;
+        const MAX_ROUNDS: usize = 3;
         let mut rounds = 0;
 
         loop {
-            let search_query = match extract_search_query(&final_reply) {
-                Some(q) => q,
-                None => break, // 无搜索标记，结束
-            };
+            let intent = extract_intent(&final_reply);
 
-            rounds += 1;
-            if rounds > MAX_SEARCH_ROUNDS {
-                warn!("搜索轮次超过上限 {MAX_SEARCH_ROUNDS}，停止搜索，直接返回当前内容");
-                break;
-            }
+            match intent {
+                Intent::None => break,
+                Intent::Search(query) => {
+                    rounds += 1;
+                    if rounds > MAX_ROUNDS {
+                        warn!("搜索轮次超过上限 {MAX_ROUNDS}，停止");
+                        break;
+                    }
 
-            info!("触发联网搜索({rounds}/{MAX_SEARCH_ROUNDS})：{search_query}");
+                    info!("触发联网搜索({rounds}/{MAX_ROUNDS})：{query}");
+                    hist.pop(); // 移除含标记的 assistant 消息
 
-            // 移除含 [SEARCH:...] 的 assistant 消息
-            hist.pop();
+                    let search_results = search::web_search(&query, 5).await;
+                    hist.push(Message::new(
+                        Role::System,
+                        &format!(
+                            "你刚才请求了搜索「{}」。以下是搜索结果：\n\n{}",
+                            query, search_results
+                        ),
+                    ));
 
-            // 执行搜索
-            let search_results = search::web_search(&search_query, 5).await;
-
-            // 注入搜索结果
-            hist.push(Message::new(
-                Role::System,
-                &format!(
-                    "你刚才请求了搜索「{}」。以下是搜索结果：\n\n{}",
-                    search_query, search_results
-                ),
-            ));
-
-            // 下一轮：带超时的流式调用
-            match timeout(
-                Duration::from_secs(30),
-                self.stream_with_delta(&mut hist, &mut on_delta),
-            )
-            .await
-            {
-                Ok(Ok(reply)) => {
-                    final_reply = reply;
-                    // 若 reply 仍含 [SEARCH:...]，循环继续；否则 break
+                    match timeout(
+                        Duration::from_secs(30),
+                        self.stream_with_delta(&mut hist, &mut on_delta),
+                    )
+                    .await
+                    {
+                        Ok(Ok(reply)) => final_reply = reply,
+                        Ok(Err(e)) => {
+                            warn!("搜索后生成回复失败: {e}");
+                            let fallback = format!("关于「{}」的搜索结果如下：\n\n{}", query, search_results);
+                            hist.push(Message::new(Role::Assistant, &fallback));
+                            on_delta(&fallback);
+                            Self::truncate_history(&mut hist, self.max_history);
+                            return Ok(fallback);
+                        }
+                        Err(_) => {
+                            warn!("搜索后生成回复超时");
+                            let fallback = format!(
+                                "搜索「{}」完成，但生成回复超时。以下是搜索结果供参考：\n\n{}",
+                                query, search_results
+                            );
+                            hist.push(Message::new(Role::Assistant, &fallback));
+                            on_delta(&fallback);
+                            Self::truncate_history(&mut hist, self.max_history);
+                            return Ok(fallback);
+                        }
+                    }
                 }
-                Ok(Err(e)) => {
-                    warn!("搜索后生成回复失败: {e}");
-                    // 兜底：直接返回搜索结果
-                    let fallback = format!(
-                        "关于「{}」的搜索结果如下：\n\n{}",
-                        search_query, search_results
-                    );
-                    hist.push(Message::new(Role::Assistant, &fallback));
-                    on_delta(&fallback);
-                    Self::truncate_history(&mut hist, self.max_history);
-                    return Ok(fallback);
-                }
-                Err(_) => {
-                    warn!("搜索后生成回复超时");
-                    let fallback = format!(
-                        "搜索「{}」完成，但生成回复超时。以下是搜索结果供参考：\n\n{}",
-                        search_query, search_results
-                    );
-                    hist.push(Message::new(Role::Assistant, &fallback));
-                    on_delta(&fallback);
-                    Self::truncate_history(&mut hist, self.max_history);
-                    return Ok(fallback);
+                Intent::Fetch(url) => {
+                    rounds += 1;
+                    if rounds > MAX_ROUNDS {
+                        warn!("抓取轮次超过上限 {MAX_ROUNDS}，停止");
+                        break;
+                    }
+
+                    info!("触发页面抓取({rounds}/{MAX_ROUNDS})：{url}");
+                    hist.pop(); // 移除含标记的 assistant 消息
+
+                    let page_content = search::fetch_url_content(&url).await;
+                    hist.push(Message::new(
+                        Role::System,
+                        &format!(
+                            "你刚才请求了抓取页面「{}」。以下是页面内容：\n\n{}",
+                            url, page_content
+                        ),
+                    ));
+
+                    match timeout(
+                        Duration::from_secs(30),
+                        self.stream_with_delta(&mut hist, &mut on_delta),
+                    )
+                    .await
+                    {
+                        Ok(Ok(reply)) => final_reply = reply,
+                        Ok(Err(e)) => {
+                            warn!("抓取后生成回复失败: {e}");
+                            let fallback = format!("页面「{}」的内容如下：\n\n{}", url, page_content);
+                            hist.push(Message::new(Role::Assistant, &fallback));
+                            on_delta(&fallback);
+                            Self::truncate_history(&mut hist, self.max_history);
+                            return Ok(fallback);
+                        }
+                        Err(_) => {
+                            warn!("抓取后生成回复超时");
+                            let fallback = format!(
+                                "页面「{}」抓取完成，但生成回复超时。以下是页面内容供参考：\n\n{}",
+                                url, page_content
+                            );
+                            hist.push(Message::new(Role::Assistant, &fallback));
+                            on_delta(&fallback);
+                            Self::truncate_history(&mut hist, self.max_history);
+                            return Ok(fallback);
+                        }
+                    }
                 }
             }
         }
 
-        // 结束：截断历史，推送最终回复
         Self::truncate_history(&mut hist, self.max_history);
 
-        // 如果最终回复仍含 [SEARCH:...]（达到搜索上限），清洗掉标记
-        if extract_search_query(&final_reply).is_some() {
-            warn!("最终回复仍含搜索标记，已清洗");
-            final_reply = sanitize_search_marker(&final_reply);
+        // 清洗残留标记（达到轮次上限时）
+        if matches!(extract_intent(&final_reply), Intent::Search(_) | Intent::Fetch(_)) {
+            warn!("最终回复仍含操作标记，已清洗");
+            final_reply = sanitize_action_marker(&final_reply);
         }
 
         on_delta(&final_reply);
         Ok(final_reply)
     }
 
-    /// 静默执行一轮流式调用（不调用 on_delta），返回完整回复并自动追加到历史。
     async fn stream_silent(&self, hist: &mut Vec<Message>) -> Result<String, AppError> {
         let request = Request::basic_query(hist.clone());
         let stream = request
@@ -182,7 +221,6 @@ impl DeepseekClient {
         Ok(full)
     }
 
-    /// 执行一轮流式调用，通过 `on_delta` 推送增量，返回完整回复并追加到历史。
     async fn stream_with_delta<F>(
         &self,
         hist: &mut Vec<Message>,
@@ -219,27 +257,47 @@ impl DeepseekClient {
     }
 }
 
-fn extract_search_query(reply: &str) -> Option<String> {
-    let start = reply.find("[SEARCH:")?;
-    let after_start = start + "[SEARCH:".len();
-    let end = reply[after_start..].find(']')?;
-    let query = reply[after_start..after_start + end].trim().to_string();
-    if query.is_empty() {
-        return None;
+/// 从回复中提取意图：搜索、抓取页面、或什么都不做。
+fn extract_intent(reply: &str) -> Intent {
+    // 先检查 [FETCH:URL]
+    if let Some(url) = extract_fetch_url(reply) {
+        return Intent::Fetch(url);
     }
-    Some(query)
+    // 再检查 [SEARCH:关键词]
+    if let Some(query) = extract_search_query(reply) {
+        return Intent::Search(query);
+    }
+    Intent::None
 }
 
-/// 清洗回复中的 `[SEARCH:...]` 标记，避免泄漏给用户。
-fn sanitize_search_marker(reply: &str) -> String {
+fn extract_search_query(reply: &str) -> Option<String> {
+    let start = reply.find("[SEARCH:")?;
+    let after = start + "[SEARCH:".len();
+    let end = reply[after..].find(']')?;
+    let q = reply[after..after + end].trim().to_string();
+    if q.is_empty() { None } else { Some(q) }
+}
+
+fn extract_fetch_url(reply: &str) -> Option<String> {
+    let start = reply.find("[FETCH:")?;
+    let after = start + "[FETCH:".len();
+    let end = reply[after..].find(']')?;
+    let url = reply[after..after + end].trim().to_string();
+    if url.is_empty() { None } else { Some(url) }
+}
+
+/// 清洗回复中的 `[SEARCH:...]` 和 `[FETCH:...]` 标记。
+fn sanitize_action_marker(reply: &str) -> String {
     let mut out = reply.to_string();
-    while let Some(start) = out.find("[SEARCH:") {
-        let after = start + "[SEARCH:".len();
-        if let Some(end_rel) = out[after..].find(']') {
-            let end = after + end_rel;
-            out.replace_range(start..=end, "");
-        } else {
-            break;
+    for prefix in &["[SEARCH:", "[FETCH:"] {
+        while let Some(start) = out.find(prefix) {
+            let after = start + prefix.len();
+            if let Some(end_rel) = out[after..].find(']') {
+                let end = after + end_rel;
+                out.replace_range(start..=end, "");
+            } else {
+                break;
+            }
         }
     }
     out.trim().to_string()
