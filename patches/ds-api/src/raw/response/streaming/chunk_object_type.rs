@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum ChunkObjectType {
+    #[serde(rename = "chat.completion.chunk")]
     ChatCompletionChunk,
 }
