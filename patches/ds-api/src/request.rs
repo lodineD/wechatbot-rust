@@ -95,7 +95,7 @@ impl Request {
     pub fn basic_query(messages: Vec<Message>) -> Self {
         Self::builder()
             .messages(messages)
-            .model(Model::deepseek_v4_pro())
+            .model(Model::deepseek_v4_flash())
     }
 
     /// 创建一个基本的聊天请求，使用 DeepseekReasoner 模型。
