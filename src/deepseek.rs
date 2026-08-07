@@ -103,6 +103,9 @@ impl DeepseekClient {
                     info!("触发联网搜索({rounds}/{MAX_ROUNDS})：{query}");
                     hist.pop(); // 移除含标记的 assistant 消息
 
+                    // 推送搜索进度提示
+                    on_delta(&format!("\n🔍 正在搜索「{}」，请稍后...\n", query));
+
                     let search_results = search::web_search(&query, 5).await;
                     hist.push(Message::new(
                         Role::System,
@@ -112,9 +115,10 @@ impl DeepseekClient {
                         ),
                     ));
 
+                    // 第二轮改为静默收集，避免标记泄漏给用户
                     match timeout(
                         Duration::from_secs(30),
-                        self.stream_with_delta(&mut hist, &mut on_delta),
+                        self.stream_silent(&mut hist),
                     )
                     .await
                     {
@@ -150,6 +154,9 @@ impl DeepseekClient {
                     info!("触发页面抓取({rounds}/{MAX_ROUNDS})：{url}");
                     hist.pop(); // 移除含标记的 assistant 消息
 
+                    // 推送抓取进度提示
+                    on_delta(&format!("\n📄 正在抓取页面，请稍后...\n"));
+
                     let page_content = search::fetch_url_content(&url).await;
                     hist.push(Message::new(
                         Role::System,
@@ -159,9 +166,10 @@ impl DeepseekClient {
                         ),
                     ));
 
+                    // 第二轮改为静默收集
                     match timeout(
                         Duration::from_secs(30),
-                        self.stream_with_delta(&mut hist, &mut on_delta),
+                        self.stream_silent(&mut hist),
                     )
                     .await
                     {
@@ -214,33 +222,6 @@ impl DeepseekClient {
             let chunk = chunk_result?;
             if let Some(c) = chunk.choices.get(0).and_then(|c| c.delta.content.as_ref()) {
                 full.push_str(c);
-            }
-        }
-
-        hist.push(Message::new(Role::Assistant, &full));
-        Ok(full)
-    }
-
-    async fn stream_with_delta<F>(
-        &self,
-        hist: &mut Vec<Message>,
-        on_delta: &mut F,
-    ) -> Result<String, AppError>
-    where
-        F: FnMut(&str),
-    {
-        let request = Request::basic_query(hist.clone());
-        let stream = request
-            .execute_client_streaming(&self.http, &self.token)
-            .await?;
-        pin_mut!(stream);
-
-        let mut full = String::new();
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result?;
-            if let Some(c) = chunk.choices.get(0).and_then(|c| c.delta.content.as_ref()) {
-                full.push_str(c);
-                on_delta(c);
             }
         }
 
