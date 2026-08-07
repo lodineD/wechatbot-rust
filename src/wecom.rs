@@ -129,6 +129,24 @@ fn extract_text_content(frame: &WsFrame) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
+/// 从消息帧中提取会话标识，用于隔离多会话历史。
+///
+/// 格式：`chatid:userid`，若取不到则回退到 `"default"`。
+fn extract_session_key(frame: &WsFrame) -> String {
+    let body = frame.body.as_ref();
+    let chatid = body
+        .and_then(|b| b.get("chatid"))
+        .and_then(|v| v.as_str());
+    let userid = body
+        .and_then(|b| b.get("from"))
+        .and_then(|v| v.get("userid"))
+        .and_then(|v| v.as_str());
+    match (chatid, userid) {
+        (Some(c), Some(u)) => format!("{c}:{u}"),
+        _ => "default".to_string(),
+    }
+}
+
 /// 发送欢迎语。
 async fn send_welcome(client: &WSClient, frame: &WsFrame) -> Result<(), AppError> {
     let body = json!({
@@ -143,7 +161,7 @@ async fn send_welcome(client: &WSClient, frame: &WsFrame) -> Result<(), AppError
     Ok(())
 }
 
-/// 处理文本消息：调用 DeepSeek 并将结果回复给用户。
+/// 处理文本消息：调用 DeepSeek（流式）并将结果分片推送给用户。
 async fn handle_text_message(
     client: &WSClient,
     deepseek: &DeepseekClient,
@@ -155,32 +173,71 @@ async fn handle_text_message(
         return Ok(());
     }
 
-    info!("收到消息: {content}");
+    let session_key = extract_session_key(frame);
+    info!("收到消息(session={session_key}): {content}");
 
-    // 企业微信被动回复用户消息必须使用 stream 格式（msgtype="stream"），
-    // 不能使用 text 格式（text 仅用于欢迎语）。
-    // 这里我们一次性返回完整回复，finish=true。
     let stream_id = generate_req_id("stream");
 
-    match deepseek.chat(&content).await {
+    // 先发送占位提示
+    if let Err(e) = client
+        .reply_stream(frame, &stream_id, "正在思考...", false, None, None)
+        .await
+    {
+        error!("发送占位消息失败: {e}");
+        // 占位失败不阻断后续流程
+    }
+
+    // 批量推送：累积一定字符后再推一次，避免过于频繁
+    let mut accumulated = String::new();
+    let mut last_flush_len = 0usize;
+    const FLUSH_THRESHOLD: usize = 15; // 累计新增 15 个字符后推一次
+
+    let result = deepseek
+        .chat_stream(&session_key, &content, |delta| {
+            accumulated.push_str(delta);
+            // 累计足够增量时推一次
+            if accumulated.len() - last_flush_len >= FLUSH_THRESHOLD {
+                // 不阻塞回调，直接推
+                let _ = client.reply_stream(
+                    frame,
+                    &stream_id,
+                    &accumulated,
+                    false,
+                    None,
+                    None,
+                );
+                last_flush_len = accumulated.len();
+            }
+        })
+        .await;
+
+    match result {
         Ok(reply) => {
-            info!("DeepSeek 回复: {reply}");
+            info!("DeepSeek 回复(session={session_key}): {reply}");
+            // 最终推送完整内容，finish=true
             client
                 .reply_stream(frame, &stream_id, &reply, true, None, None)
                 .await?;
         }
         Err(e) => {
-            error!("调用 DeepSeek API 失败: {e}");
-            client
-                .reply_stream(
-                    frame,
-                    &stream_id,
-                    "抱歉，我现在有点问题，请稍后再试。",
-                    true,
-                    None,
-                    None,
-                )
-                .await?;
+            error!("调用 DeepSeek API 失败(session={session_key}): {e}");
+            // 如果已有部分内容，先把已收到的推完（finish=true）
+            if !accumulated.is_empty() {
+                client
+                    .reply_stream(frame, &stream_id, &accumulated, true, None, None)
+                    .await?;
+            } else {
+                client
+                    .reply_stream(
+                        frame,
+                        &stream_id,
+                        "抱歉，我现在有点问题，请稍后再试。",
+                        true,
+                        None,
+                        None,
+                    )
+                    .await?;
+            }
         }
     }
 
