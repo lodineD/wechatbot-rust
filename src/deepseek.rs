@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Clone)]
 pub struct DeepseekClient {
@@ -46,8 +46,11 @@ impl DeepseekClient {
                         Role::System,
                         "\n\n[系统能力] 你具备联网搜索能力。当用户提问涉及实时信息、新闻、最新数据、不确定的事实等需要联网获取的内容时，\
                          你必须在回复中严格按照以下格式输出搜索请求：\n[SEARCH:搜索关键词]\n\n\
-                         你的回复只需要包含搜索关键词，不需要多余的解释。搜索完成后，你会看到搜索结果，\
-                         再基于搜索结果给出最终回答。如果不需要搜索，直接正常回复即可。",
+                         注意：\n\
+                         1. 你的回复只需要包含搜索关键词，不需要多余的解释。\n\
+                         2. 当你看到系统注入的「以下是搜索结果」内容后，必须直接基于搜索结果给出最终回答，\
+                         不要再输出 [SEARCH:...] 标记。\n\
+                         3. 如果不需要搜索，直接正常回复即可。",
                     ));
                 }
                 Arc::new(Mutex::new(hist))
@@ -57,6 +60,9 @@ impl DeepseekClient {
     }
 
     /// 流式聊天（含自动联网搜索）。
+    ///
+    /// 支持多层搜索：若模型在搜索后仍输出 `[SEARCH:...]`，会继续搜索，
+    /// 最多 `max_search_rounds` 轮，避免死循环。
     pub async fn chat_stream<F>(
         &self,
         session_key: &str,
@@ -71,10 +77,25 @@ impl DeepseekClient {
         hist.push(Message::new(Role::User, prompt));
 
         // 第一轮：静默收集，检查是否需要搜索
-        let first_reply = self.stream_silent(&mut hist).await?;
+        let mut final_reply = self.stream_silent(&mut hist).await?;
 
-        if let Some(search_query) = extract_search_query(&first_reply) {
-            info!("触发联网搜索：{search_query}");
+        // 最多进行 max_search_rounds 轮搜索
+        const MAX_SEARCH_ROUNDS: usize = 3;
+        let mut rounds = 0;
+
+        loop {
+            let search_query = match extract_search_query(&final_reply) {
+                Some(q) => q,
+                None => break, // 无搜索标记，结束
+            };
+
+            rounds += 1;
+            if rounds > MAX_SEARCH_ROUNDS {
+                warn!("搜索轮次超过上限 {MAX_SEARCH_ROUNDS}，停止搜索，直接返回当前内容");
+                break;
+            }
+
+            info!("触发联网搜索({rounds}/{MAX_SEARCH_ROUNDS})：{search_query}");
 
             // 移除含 [SEARCH:...] 的 assistant 消息
             hist.pop();
@@ -91,46 +112,54 @@ impl DeepseekClient {
                 ),
             ));
 
-            // 第二轮：流式推送（带超时）
+            // 下一轮：带超时的流式调用
             match timeout(
                 Duration::from_secs(30),
                 self.stream_with_delta(&mut hist, &mut on_delta),
             )
             .await
             {
-                Ok(Ok(final_reply)) => {
-                    Self::truncate_history(&mut hist, self.max_history);
-                    return Ok(final_reply);
+                Ok(Ok(reply)) => {
+                    final_reply = reply;
+                    // 若 reply 仍含 [SEARCH:...]，循环继续；否则 break
                 }
-                Ok(Err(_e)) => {
-                    // 第二轮调用失败，把搜索结果直接返回作为兜底
+                Ok(Err(e)) => {
+                    warn!("搜索后生成回复失败: {e}");
+                    // 兜底：直接返回搜索结果
                     let fallback = format!(
                         "关于「{}」的搜索结果如下：\n\n{}",
                         search_query, search_results
                     );
                     hist.push(Message::new(Role::Assistant, &fallback));
-                    Self::truncate_history(&mut hist, self.max_history);
                     on_delta(&fallback);
+                    Self::truncate_history(&mut hist, self.max_history);
                     return Ok(fallback);
                 }
                 Err(_) => {
-                    // 超时
+                    warn!("搜索后生成回复超时");
                     let fallback = format!(
                         "搜索「{}」完成，但生成回复超时。以下是搜索结果供参考：\n\n{}",
                         search_query, search_results
                     );
                     hist.push(Message::new(Role::Assistant, &fallback));
-                    Self::truncate_history(&mut hist, self.max_history);
                     on_delta(&fallback);
+                    Self::truncate_history(&mut hist, self.max_history);
                     return Ok(fallback);
                 }
             }
         }
 
-        // 无搜索标记：直接推送第一轮回复
+        // 结束：截断历史，推送最终回复
         Self::truncate_history(&mut hist, self.max_history);
-        on_delta(&first_reply);
-        Ok(first_reply)
+
+        // 如果最终回复仍含 [SEARCH:...]（达到搜索上限），清洗掉标记
+        if extract_search_query(&final_reply).is_some() {
+            warn!("最终回复仍含搜索标记，已清洗");
+            final_reply = sanitize_search_marker(&final_reply);
+        }
+
+        on_delta(&final_reply);
+        Ok(final_reply)
     }
 
     /// 静默执行一轮流式调用（不调用 on_delta），返回完整回复并自动追加到历史。
@@ -199,4 +228,19 @@ fn extract_search_query(reply: &str) -> Option<String> {
         return None;
     }
     Some(query)
+}
+
+/// 清洗回复中的 `[SEARCH:...]` 标记，避免泄漏给用户。
+fn sanitize_search_marker(reply: &str) -> String {
+    let mut out = reply.to_string();
+    while let Some(start) = out.find("[SEARCH:") {
+        let after = start + "[SEARCH:".len();
+        if let Some(end_rel) = out[after..].find(']') {
+            let end = after + end_rel;
+            out.replace_range(start..=end, "");
+        } else {
+            break;
+        }
+    }
+    out.trim().to_string()
 }
