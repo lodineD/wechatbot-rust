@@ -1,6 +1,7 @@
 mod config;
 mod deepseek;
 mod error;
+mod search;
 mod wecom;
 
 use anyhow::Result;

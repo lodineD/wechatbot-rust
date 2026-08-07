@@ -20,6 +20,7 @@ dotenvy = "0.15"
 dashmap = "6"
 reqwest = "0.13"
 futures = "0.3"
+rust-websearch = "0.1"
 
 [profile.release]
 opt-level = 3
