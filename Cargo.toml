@@ -21,6 +21,7 @@ dashmap = "6"
 reqwest = "0.13"
 futures = "0.3"
 rust-websearch = "0.1"
+chrono = "0.4"
 
 [profile.release]
 opt-level = 3

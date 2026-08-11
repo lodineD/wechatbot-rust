@@ -1,6 +1,9 @@
 use crate::deepseek::DeepseekClient;
 use crate::error::AppError;
+use crate::rss;
+use chrono::{Duration as ChronoDuration, Local, NaiveTime};
 use serde_json::json;
+use tokio::time::Duration;
 use tracing::{error, info, warn};
 use wecom_aibot_rust_sdk::{generate_req_id, SdkError, WSClient, WSClientOptions, WsFrame};
 
@@ -17,7 +20,7 @@ impl WecomBot {
         Self { client, deepseek }
     }
 
-    pub async fn run(&self) -> Result<(), AppError> {
+    pub async fn run(&self, daily_news_chat_id: Option<String>) -> Result<(), AppError> {
         let client = self.client.clone();
 
         self.client.on_connected(move || info!("企业微信 WebSocket 已连接")).await;
@@ -46,10 +49,11 @@ impl WecomBot {
 
         // 文本消息 → DeepSeek
         let deepseek = self.deepseek.clone();
+        let client_for_msg = client.clone();
         self.client.on_message_text(move |frame| {
             let frame = frame.clone();
             let deepseek = deepseek.clone();
-            let client = client.clone();
+            let client = client_for_msg.clone();
             tokio::spawn(async move {
                 if let Err(e) = handle_text_message(&client, &deepseek, &frame).await {
                     error!("处理文本消息失败: {e}");
@@ -65,11 +69,88 @@ impl WecomBot {
             return Err(e.into());
         }
 
+        info!("企业微信智能机器人已就绪");
+
+        // 启动定时日报推送（如果配置了 DAILY_NEWS_CHAT_ID）
+        let http_client = reqwest::Client::new();
+        let chat_id = daily_news_chat_id.clone();
+        let client_for_news = client.clone();
+
+        // 在后台启动日报任务
+        tokio::spawn(async move {
+            if let Err(e) = schedule_daily_news(client_for_news, chat_id, &http_client).await {
+                error!("定时日报推送失败: {e}");
+            }
+        });
+
+        // 阻塞等待 Ctrl+C
         tokio::signal::ctrl_c().await.ok();
         info!("收到退出信号，正在断开连接...");
+
         self.client.disconnect();
         Ok(())
     }
+}
+
+/// 计算距离下一个 09:00（本地时间）还有多少秒。
+fn seconds_until_next_nine_am() -> u64 {
+    let now = Local::now();
+    let target_time = NaiveTime::from_hms_opt(9, 0, 0).unwrap();
+    let today_target = now.date_naive().and_time(target_time);
+
+    let target = if now.naive_local() <= today_target {
+        today_target
+    } else {
+        today_target + ChronoDuration::days(1)
+    };
+
+    let duration = target.signed_duration_since(now.naive_local());
+    duration.num_seconds().max(0) as u64
+}
+
+/// 定时日报推送：等待到下一个本地 09:00，推送后循环。
+async fn schedule_daily_news(
+    client: WSClient,
+    chat_id: Option<String>,
+    http: &reqwest::Client,
+) -> Result<(), AppError> {
+    let Some(ref cid) = chat_id else {
+        info!("未配置 DAILY_NEWS_CHAT_ID，跳过定时日报推送");
+        return Ok(());
+    };
+
+    loop {
+        let seconds = seconds_until_next_nine_am();
+        let delay = Duration::from_secs(seconds);
+        info!("下次日报推送将在 {:?} 后 (09:00 本地时间)", delay);
+        tokio::time::sleep(delay).await;
+
+        info!("开始推送 Rust.cc 日报...");
+        match fetch_and_push_news(&client, cid, http).await {
+            Ok(_) => info!("日报推送成功"),
+            Err(e) => error!("日报推送失败: {e}"),
+        }
+
+        // 等 5 分钟再算下一个 09:00，避免同一分钟内重复触发
+        tokio::time::sleep(Duration::from_secs(300)).await;
+    }
+}
+
+/// 获取 RSS 资讯并推送到指定群聊。
+async fn fetch_and_push_news(
+    client: &WSClient,
+    chat_id: &str,
+    http: &reqwest::Client,
+) -> Result<(), AppError> {
+    let content = rss::fetch_rust_news(http).await;
+
+    let body = json!({
+        "msgtype": "text",
+        "text": { "content": content }
+    });
+
+    client.send_message(chat_id, body).await?;
+    Ok(())
 }
 
 fn is_not_subscribed_error(err: &SdkError) -> bool {

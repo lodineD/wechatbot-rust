@@ -8,6 +8,8 @@ pub struct AppConfig {
     pub wechat_bot_secret: String,
     pub deepseek_api_key: String,
     pub deepseek_system_prompt: String,
+    /// 定时推送日报的目标群聊 chatid（留空则不启用定时推送）。
+    pub daily_news_chat_id: Option<String>,
 }
 
 impl AppConfig {
@@ -22,6 +24,9 @@ impl AppConfig {
                 .context("缺少环境变量 DEEPSEEK_API_KEY")?,
             deepseek_system_prompt: env::var("DEEPSEEK_SYSTEM_PROMPT")
                 .unwrap_or_else(|_| "你是一个 helpful 的 AI 助手".to_string()),
+            daily_news_chat_id: env::var("DAILY_NEWS_CHAT_ID")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
         })
     }
 }
