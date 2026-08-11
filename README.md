@@ -1,12 +1,15 @@
 # wechatbot-rust
 
-一个基于 Rust 的企业微信智能机器人 Agent，接入 DeepSeek 大模型实现自动回复。
+一个基于 Rust 的企业微信智能机器人 Agent，接入 DeepSeek 大模型实现自动回复，支持自动联网搜索、网页内容抓取和每日 Rust 资讯定时推送。
 
 ## 功能
 
 - 通过 `wecom-aibot-rust-sdk` 与企业微信智能机器人建立 WebSocket 长连接。
 - 接收用户文本消息后，调用 `ds-api` 请求 DeepSeek 生成回复。
-- 将 DeepSeek 的回复通过企业微信智能机器人通道返回给用户。
+- **自动联网搜索**：当 DeepSeek 输出 `[SEARCH:关键词]` 时，自动搜索并把结果注入对话。
+- **网页内容抓取**：当 DeepSeek 输出 `[FETCH:URL]` 时，自动抓取页面内容并返回摘要。
+- **每日 Rust 资讯推送**：每天本地时间 09:00 向指定群聊推送 [Rust.cc](https://rustcc.cn/) 日报（RSS）。
+- 将 DeepSeek 的回复通过企业微信智能机器人通道流式返回给用户。
 
 ## 项目结构
 
@@ -17,6 +20,8 @@ wechatbot-rust/
 │   ├── config.rs     # 环境变量与配置加载
 │   ├── error.rs      # 全局错误类型
 │   ├── deepseek.rs   # DeepSeek 客户端封装
+│   ├── search.rs     # 联网搜索与网页抓取
+│   ├── rss.rs        # Rust.cc RSS 资讯抓取
 │   └── wecom.rs      # 企业微信事件处理与生命周期管理
 ├── Cargo.toml
 ├── Dockerfile
@@ -60,14 +65,29 @@ docker run --env-file .env wechatbot-rust
 | `WECHAT_BOT_ID` | 是 | 企业微信智能机器人 Bot ID |
 | `WECHAT_BOT_SECRET` | 是 | 企业微信智能机器人 Secret |
 | `DEEPSEEK_API_KEY` | 是 | DeepSeek API Key |
-| `DEEPSEEK_SYSTEM_PROMPT` | 否 | 系统提示词，默认“你是一个 helpful 的 AI 助手” |
+| `DEEPSEEK_SYSTEM_PROMPT` | 否 | 系统提示词，默认“你是一个 helpful 的 AI 助手”。含空格时请用双引号包裹 |
+| `DAILY_NEWS_CHAT_ID` | 否 | 定时推送 Rust 日报的目标群聊 chatid，留空则不启用 |
 | `RUST_LOG` | 否 | 日志级别，默认 `info` |
+
+## 每日 Rust 资讯推送
+
+开启步骤：
+
+1. 在企业微信后台获取目标群聊的 `chatid`。
+2. 在 `.env` 中设置：
+   ```env
+   DAILY_NEWS_CHAT_ID=your_chat_id_here
+   ```
+3. 重新启动程序。
+
+程序会在每天本地时间 09:00 自动抓取 [Rust.cc RSS](https://rustcc.cn/rss) 并推送到指定群聊。
 
 ## 注意事项
 
 - 本项目基于企业微信**智能机器人**（WebSocket 长连接），不是群机器人 Webhook。
 - 企业微信智能机器人需要在企业微信后台开启“API 模式”并获取 `BotID` 和 `Secret`。
 - 请妥善保管 `WECHAT_BOT_SECRET` 和 `DEEPSEEK_API_KEY`，不要硬编码到代码中。
+- `.env` 中若值包含空格或特殊字符，建议用双引号包裹，否则可能导致解析失败。
 
 ## 许可证
 
