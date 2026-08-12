@@ -11,3 +11,4 @@ pub enum ResponseFormatType {
     Text,
     JsonObject,
 }
+

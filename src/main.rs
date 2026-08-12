@@ -79,3 +79,22 @@ fn load_dotenv() {
 
     warn!("未找到可用的 .env 文件，将完全依赖系统环境变量");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dotenv_loads_without_error() {
+        // 初始化日志，确保能打印诊断信息
+        let _ = tracing_subscriber::fmt::try_init();
+        load_dotenv();
+
+        // 只要能执行到这里，说明 .env 没有解析错误。
+        // 进一步验证关键环境变量已加载。
+        assert!(
+            std::env::var("WECHAT_BOT_ID").is_ok() || std::env::var("WECHAT_BOT_SECRET").is_ok(),
+            "至少应能读到部分环境变量"
+        );
+    }
+}
