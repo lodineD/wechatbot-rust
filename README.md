@@ -70,6 +70,7 @@ docker run --env-file .env wechatbot-rust
 | `DAILY_NEWS_CHAT_ID` | 否 | 定时推送 Rust 日报的目标群聊 chatid，留空则不启用 |
 | `RUST_LOG` | 否 | 日志级别，默认 `info` |
 | `OBSCURA_ENABLED` | 否 | 设为 `true` 时，普通抓取失败或被反爬时调用 Obscura 重新抓取，需先在 PATH 中安装 `obscura` |
+| `OBSCURA_FETCH_MODE` | 否 | `always` 始终用 Obscura 抓取；`fallback`（默认）普通抓取失败/反爬时 fallback；`never` 禁用 |
 
 ## 每日 Rust 资讯推送
 
