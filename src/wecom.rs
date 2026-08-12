@@ -92,10 +92,10 @@ impl WecomBot {
     }
 }
 
-/// 计算距离下一个 09:40（本地时间）还有多少秒。
-fn seconds_until_next_nine_forty_am() -> u64 {
+/// 计算距离下一个 09:10（本地时间）还有多少秒。
+fn seconds_until_next_nine_ten_am() -> u64 {
     let now = Local::now();
-    let target_time = NaiveTime::from_hms_opt(9, 50, 0).unwrap();
+    let target_time = NaiveTime::from_hms_opt(9, 10, 0).unwrap();
     let today_target = now.date_naive().and_time(target_time);
 
     let target = if now.naive_local() <= today_target {
@@ -108,7 +108,7 @@ fn seconds_until_next_nine_forty_am() -> u64 {
     duration.num_seconds().max(0) as u64
 }
 
-/// 定时日报推送：等待到下一个本地 09:40，推送后循环。
+/// 定时日报推送：等待到下一个本地 09:10，推送后循环。
 async fn schedule_daily_news(
     client: WSClient,
     chat_id: Option<String>,
@@ -120,9 +120,9 @@ async fn schedule_daily_news(
     };
 
     loop {
-        let seconds = seconds_until_next_nine_forty_am();
+        let seconds = seconds_until_next_nine_ten_am();
         let delay = Duration::from_secs(seconds);
-        info!("下次日报推送将在 {:?} 后 (09:40 本地时间)", delay);
+        info!("下次日报推送将在 {:?} 后 (09:10 本地时间)", delay);
         tokio::time::sleep(delay).await;
 
         info!("开始推送 Rust.cc 日报...");
@@ -131,7 +131,7 @@ async fn schedule_daily_news(
             Err(e) => error!("日报推送失败: {e}"),
         }
 
-        // 等 5 分钟再算下一个 09:40，避免同一分钟内重复触发
+        // 等 5 分钟再算下一个 09:10，避免同一分钟内重复触发
         tokio::time::sleep(Duration::from_secs(300)).await;
     }
 }
