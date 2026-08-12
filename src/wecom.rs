@@ -205,35 +205,29 @@ async fn handle_text_message(
 
     // 流式收集 + 批量推送
     let mut buf = String::new();
-    let mut last_flush = 0usize;
-    const FLUSH_AT: usize = 15;
-
-    let client_delta = client.clone();
-    let frame_delta = frame.clone();
-    let sid_delta = stream_id.clone();
 
     let result = deepseek
         .chat_stream(&session_key, &content, |delta| {
             buf.push_str(delta);
-            if buf.len() - last_flush >= FLUSH_AT {
-                let c = client_delta.clone();
-                let f = frame_delta.clone();
-                let s = sid_delta.clone();
-                let b = buf.clone();
-                tokio::spawn(async move {
-                    let _ = c.reply_stream(&f, &s, &b, false, None, None).await;
-                });
-                last_flush = buf.len();
-            }
         })
         .await;
 
     match result {
         Ok(reply) => {
             info!("DeepSeek 回复(session={session_key}): {reply}");
-            // 最终推送 finish=true
-            let output = if buf.len() == reply.len() { &buf } else { &reply };
-            client.reply_stream(frame, &stream_id, output, true, None, None).await?;
+            // 模拟流式推送：把完整回复分块累积发送，最后 finish=true
+            const CHUNK_SIZE: usize = 15;
+            let chars: Vec<char> = buf.chars().collect();
+            let mut pos = 0usize;
+            while pos < chars.len() {
+                pos = (pos + CHUNK_SIZE).min(chars.len());
+                let text: String = chars[..pos].iter().collect();
+                let is_last = pos == chars.len();
+                client.reply_stream(frame, &stream_id, &text, is_last, None, None).await?;
+                if !is_last {
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                }
+            }
         }
         Err(e) => {
             error!("调用 DeepSeek API 失败(session={session_key}): {e}");

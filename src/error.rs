@@ -8,6 +8,7 @@ pub enum AppError {
     WeCom(SdkError),
     DeepSeek(DeepSeekError),
     Config(String),
+    Internal(String),
     Other(anyhow::Error),
 }
 
@@ -17,6 +18,7 @@ impl fmt::Display for AppError {
             AppError::WeCom(e) => write!(f, "企业微信 SDK 错误: {e}"),
             AppError::DeepSeek(e) => write!(f, "DeepSeek API 错误: {e}"),
             AppError::Config(e) => write!(f, "配置错误: {e}"),
+            AppError::Internal(e) => write!(f, "内部错误: {e}"),
             AppError::Other(e) => write!(f, "其他错误: {e}"),
         }
     }

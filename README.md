@@ -6,9 +6,10 @@
 
 - 通过 `wecom-aibot-rust-sdk` 与企业微信智能机器人建立 WebSocket 长连接。
 - 接收用户文本消息后，调用 `ds-api` 请求 DeepSeek 生成回复。
-- **自动联网搜索**：当 DeepSeek 输出 `[SEARCH:关键词]` 时，自动搜索并把结果注入对话。
-- **网页内容抓取**：当 DeepSeek 输出 `[FETCH:URL]` 时，自动抓取页面内容并返回摘要。
-- **每日 Rust 资讯推送**：每天本地时间 09:00 向指定群聊推送 [Rust.cc](https://rustcc.cn/) 日报（RSS）。
+- **自动联网搜索**：通过 DeepSeek Tool Calling 调用 `web_search` 工具，自动搜索并把结果注入对话。
+- **网页内容抓取**：通过 DeepSeek Tool Calling 调用 `fetch` 工具，自动抓取页面内容并返回摘要。
+- **Obscura 反爬 fallback**：当普通抓取遇到反爬页面时，可启用 [Obscura](https://github.com/h4ckf0r0day/obscura) headless 浏览器重新抓取。
+- **每日 Rust 资讯推送**：每天本地时间 09:10 向指定群聊推送 [Rust.cc](https://rustcc.cn/) 日报（RSS）。
 - 将 DeepSeek 的回复通过企业微信智能机器人通道流式返回给用户。
 
 ## 项目结构
@@ -68,6 +69,7 @@ docker run --env-file .env wechatbot-rust
 | `DEEPSEEK_SYSTEM_PROMPT` | 否 | 系统提示词，默认“你是一个 helpful 的 AI 助手”。含空格时请用双引号包裹 |
 | `DAILY_NEWS_CHAT_ID` | 否 | 定时推送 Rust 日报的目标群聊 chatid，留空则不启用 |
 | `RUST_LOG` | 否 | 日志级别，默认 `info` |
+| `OBSCURA_ENABLED` | 否 | 设为 `true` 时，普通抓取失败或被反爬时调用 Obscura 重新抓取，需先在 PATH 中安装 `obscura` |
 
 ## 每日 Rust 资讯推送
 
@@ -80,7 +82,7 @@ docker run --env-file .env wechatbot-rust
    ```
 3. 重新启动程序。
 
-程序会在每天本地时间 09:00 自动抓取 [Rust.cc RSS](https://rustcc.cn/rss) 并推送到指定群聊。
+程序会在每天本地时间 09:10 自动抓取 [Rust.cc RSS](https://rustcc.cn/rss) 并推送到指定群聊。
 
 ## 注意事项
 

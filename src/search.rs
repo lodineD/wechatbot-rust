@@ -1,4 +1,9 @@
+#![allow(dead_code)]
+
 use rust_websearch::{fetch_page, search, FetchConfig, SearchConfig};
+use std::time::Duration;
+use tokio::process::Command;
+use tokio::time::timeout;
 use tracing::{info, warn};
 
 /// 单条搜索结果。
@@ -55,6 +60,7 @@ pub async fn web_search(query: &str, max_results: usize) -> String {
 /// 抓取指定 URL 的页面内容，返回格式化文本（供注入到对话历史）。
 ///
 /// 返回标题 + 正文（纯文本，最多 30KB）。
+/// 如果普通抓取失败且环境变量 `OBSCURA_ENABLED=true`，会 fallback 到 Obscura headless 浏览器。
 pub async fn fetch_url_content(url: &str) -> String {
     let config = FetchConfig::default();
     match fetch_page(url, &config).await {
@@ -70,6 +76,12 @@ pub async fn fetch_url_content(url: &str) -> String {
                 return format!("（页面「{url}」内容为空）");
             }
 
+            // 如果正文太短（如只有反爬提示），也尝试 Obscura fallback
+            if is_anti_bot_content(&page.content) && obscura_enabled() {
+                warn!("页面内容疑似反爬校验页，尝试 Obscura 重抓");
+                return fetch_with_obscura(url).await;
+            }
+
             let mut buf = format!("以下是页面「{}」的内容：\n\n", page.title);
             if page.truncated {
                 // 截断时只取前 30KB
@@ -83,7 +95,77 @@ pub async fn fetch_url_content(url: &str) -> String {
         }
         Err(e) => {
             warn!("抓取页面失败「{url}」: {e}");
-            format!("（抓取页面「{url}」出错：{e}）")
+            if obscura_enabled() {
+                fetch_with_obscura(url).await
+            } else {
+                format!("（抓取页面「{url}」出错：{e}）")
+            }
+        }
+    }
+}
+
+/// 检查内容是否像反爬/校验页面而非真实正文。
+fn is_anti_bot_content(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    let markers = [
+        "checking your browser",
+        "please wait",
+        "access denied",
+        "403 forbidden",
+        "验证码",
+        "正在校验",
+        "安全验证",
+        "anti-bot",
+    ];
+    markers.iter().any(|m| lower.contains(m))
+}
+
+/// 是否启用 Obscura fallback。
+fn obscura_enabled() -> bool {
+    std::env::var("OBSCURA_ENABLED")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// 使用 Obscura headless 浏览器抓取页面纯文本内容。
+async fn fetch_with_obscura(url: &str) -> String {
+    info!("尝试使用 Obscura 抓取: {url}");
+
+    let cmd_future = Command::new("obscura")
+        .args(["fetch", url, "--dump", "text"])
+        .output();
+
+    let result = match timeout(Duration::from_secs(60), cmd_future).await {
+        Ok(res) => res,
+        Err(_) => {
+            warn!("Obscura 抓取超时");
+            return format!("（Obscura 抓取「{url}」超时）");
+        }
+    };
+
+    match result {
+        Ok(output) if output.status.success() => {
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            info!(
+                "Obscura 抓取成功: {} ({} bytes)",
+                url,
+                text.len()
+            );
+            if text.is_empty() {
+                format!("（Obscura 抓取「{url}」返回空内容）")
+            } else {
+                format!("以下是页面「{url}」的内容：\n\n{text}")
+            }
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let code = output.status.code().map(|c| c.to_string()).unwrap_or_else(|| "未知".to_string());
+            warn!("Obscura 抓取失败 (exit={code}): {stderr}");
+            format!("（Obscura 抓取「{url}」失败，退出码 {code}：{stderr}）")
+        }
+        Err(e) => {
+            warn!("无法启动 Obscura: {e}");
+            format!("（无法启动 Obscura 抓取「{url}」：{e}）")
         }
     }
 }
