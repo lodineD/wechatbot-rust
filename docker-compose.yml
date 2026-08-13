@@ -1,5 +1,6 @@
 services:
   obscura:
+    image: wechatbot-rust-obscura:latest
     build:
       context: ./obscura
       dockerfile: Dockerfile
@@ -18,6 +19,7 @@ services:
       start_period: 10s
 
   wechatbot:
+    image: wechatbot-rust-wechatbot:latest
     build:
       context: .
       dockerfile: Dockerfile
