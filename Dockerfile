@@ -1,5 +1,5 @@
 # 第一阶段：编译
-FROM rust:1.80-bookworm AS builder
+FROM rust:1.97.1-bookworm AS builder
 
 WORKDIR /app
 COPY . .

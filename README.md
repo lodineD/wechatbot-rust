@@ -26,6 +26,7 @@ wechatbot-rust/
 │   └── wecom.rs      # 企业微信事件处理与生命周期管理
 ├── Cargo.toml
 ├── Dockerfile
+├── docker-compose.yml
 ├── .env.example
 └── README.md
 ```
@@ -59,6 +60,37 @@ docker build -t wechatbot-rust .
 docker run --env-file .env wechatbot-rust
 ```
 
+### 5. Docker Compose 运行（推荐，含 Obscura）
+
+项目已将 [Obscura](https://github.com/h4ckf0r0day/obscura) headless 浏览器集成到 `docker-compose.yml`，通过 Docker bridge 网络与本项目通信，无需在宿主机暴露 `127.0.0.1:9222` 也能使用 Obscura fallback。
+
+> **许可说明**：`obscura/` 目录为 [Obscura](https://github.com/h4ckf0r0day/obscura) 源码，采用 [Apache-2.0](https://github.com/h4ckf0r0day/obscura/blob/main/LICENSE) 许可证，与本项目主体（MIT）相互独立。
+
+要求：仓库根目录存在 `obscura/` 源码目录（用于构建 Obscura 镜像）。
+
+```bash
+# 1. 确保 .env 已配置
+cp .env.example .env
+
+# 2. 构建并启动（后台运行）
+docker compose up -d
+
+# 3. 查看日志
+docker compose logs -f wechatbot
+docker compose logs -f obscura
+
+# 4. 停止
+docker compose down
+```
+
+`docker-compose.yml` 中已预设：
+
+- `OBSCURA_ENABLED=true`
+- `OBSCURA_CDP_URL=http://obscura:9222`（通过服务名在桥接网络内访问）
+- `OBSCURA_FETCH_MODE=fallback`
+
+因此 `.env` 中即使保留默认的 `http://127.0.0.1:9222`，在 compose 环境中也会被覆盖为容器间通信地址。
+
 ## 配置说明
 
 | 环境变量 | 必填 | 说明 |
@@ -69,7 +101,8 @@ docker run --env-file .env wechatbot-rust
 | `DEEPSEEK_SYSTEM_PROMPT` | 否 | 系统提示词，默认“你是一个 helpful 的 AI 助手”。含空格时请用双引号包裹 |
 | `DAILY_NEWS_CHAT_ID` | 否 | 定时推送 Rust 日报的目标群聊 chatid，留空则不启用 |
 | `RUST_LOG` | 否 | 日志级别，默认 `info` |
-| `OBSCURA_ENABLED` | 否 | 设为 `true` 时，普通抓取失败或被反爬时调用 Obscura 重新抓取，需先在 PATH 中安装 `obscura` |
+| `OBSCURA_ENABLED` | 否 | 设为 `true` 时启用 Obscura 抓取 fallback。使用 Docker Compose 时已默认开启 |
+| `OBSCURA_CDP_URL` | 否 | Obscura CDP 服务器地址。Docker Compose 中默认 `http://obscura:9222`；本地独立运行 Obscura 时使用 `http://127.0.0.1:9222` |
 | `OBSCURA_FETCH_MODE` | 否 | `always` 始终用 Obscura 抓取；`fallback`（默认）普通抓取失败/反爬时 fallback；`never` 禁用 |
 
 ## 每日 Rust 资讯推送
@@ -94,4 +127,6 @@ docker run --env-file .env wechatbot-rust
 
 ## 许可证
 
-MIT
+本项目主体代码采用 [MIT](LICENSE) 许可证。
+
+`obscura/` 目录包含的 [Obscura](https://github.com/h4ckf0r0day/obscura) 浏览器源码采用 [Apache-2.0](https://github.com/h4ckf0r0day/obscura/blob/main/LICENSE) 许可证，版权归原作者所有。

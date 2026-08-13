@@ -1,0 +1,31 @@
+# 构建产物
+/target
+**/target
+
+ # 依赖目录
+**/.cargo/registry
+**/.cargo/git
+
+ # 版本控制
+.git
+.gitignore
+
+ # 环境变量与配置（不应打包进镜像）
+.env
+.env.*
+
+ # 本地 Obscura 源码：wechatbot-rust 镜像不需要它，它在 docker-compose 中单独构建
+/obscura
+
+ # 文档与示例
+*.md
+LICENSE
+
+ # IDE
+.idea
+.vscode
+*.iml
+
+ # OS
+.DS_Store
+Thumbs.db

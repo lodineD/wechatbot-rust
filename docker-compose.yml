@@ -1,0 +1,39 @@
+services:
+  obscura:
+    build:
+      context: ./obscura
+      dockerfile: Dockerfile
+    container_name: obscura
+    ports:
+      # 仅绑定到本地回环，避免外部网络直接访问 CDP 端口。
+      # 容器间通信走 bridge 网络，不依赖这个端口映射。
+      - "127.0.0.1:9222:9222"
+    networks:
+      - wechatbot-net
+    healthcheck:
+      test: ["CMD", "/obscura", "fetch", "https://example.com", "--dump", "text", "--timeout", "5"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  wechatbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wechatbot-rust
+    env_file:
+      - .env
+    environment:
+      # 在 Docker 桥接网络内通过服务名访问 Obscura
+      - OBSCURA_ENABLED=true
+      - OBSCURA_CDP_URL=http://obscura:9222
+      - OBSCURA_FETCH_MODE=fallback
+    depends_on:
+      - obscura
+    networks:
+      - wechatbot-net
+
+networks:
+  wechatbot-net:
+    driver: bridge
