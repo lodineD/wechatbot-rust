@@ -83,6 +83,12 @@ pub async fn fetch_url_content(url: &str) -> String {
             return fetch_with_default(url).await;
         }
         FetchMode::Fallback => {
+            // 已知需要 JS 渲染的域名（如微信公众号），直接走 Obscura
+            if needs_obscura_domain(url) {
+                info!("域名 {url} 需要 Obscura 渲染，跳过普通抓取");
+                return fetch_with_obscura(url).await;
+            }
+
             // 先普通抓取；失败或内容异常再走 Obscura
             let first_try = fetch_with_default(url).await;
             if !first_try.starts_with('（') && !first_try.starts_with('(') {
@@ -203,6 +209,18 @@ fn obscura_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// 已知普通 HTTP 抓取无法获取有效正文的域名，需要直接走 Obscura。
+///
+/// 这些页面依赖 JS 动态渲染，servo-fetch / scraper 无法提取到可读内容。
+fn needs_obscura_domain(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    const DOMAINS: &[&str] = &[
+        "mp.weixin.qq.com",
+        "weixin.qq.com",
+    ];
+    DOMAINS.iter().any(|d| lower.contains(d))
+}
+
 /// Obscura CDP 服务器根地址（HTTP）。
 fn obscura_cdp_url() -> String {
     std::env::var("OBSCURA_CDP_URL")
@@ -245,6 +263,10 @@ async fn fetch_with_obscura(url: &str) -> String {
 }
 
 /// 从 Obscura CDP 的 `/json/version` 获取 browser-level WebSocket 调试地址。
+///
+/// CDP 服务器返回的地址中 host 通常是容器内部的 `127.0.0.1`，
+/// 在 Docker bridge 网络中不可达。此函数会将 host:port 替换为
+/// 调用方实际使用的地址（即 `cdp_root` 中的 host:port）。
 async fn get_obscura_browser_ws_url(cdp_root: &str) -> Result<String, String> {
     let version_url = format!("{cdp_root}/json/version");
     let body = reqwest::get(&version_url)
@@ -257,11 +279,35 @@ async fn get_obscura_browser_ws_url(cdp_root: &str) -> Result<String, String> {
     let version: Value = serde_json::from_str(&body)
         .map_err(|e| format!("解析 CDP version 失败: {e}（响应: {body}）"))?;
 
-    version
+    let ws_url = version
         .get("webSocketDebuggerUrl")
         .and_then(|v| v.as_str())
-        .map(String::from)
-        .ok_or_else(|| "CDP version 中没有 webSocketDebuggerUrl".to_string())
+        .ok_or_else(|| "CDP version 中没有 webSocketDebuggerUrl".to_string())?;
+
+    // 将 CDP 返回的 ws://127.0.0.1:9222/... 替换为实际可达的 host:port
+    // 例如 cdp_root = "http://obscura:9222" → 替换为 ws://obscura:9222/...
+    let expected_host = cdp_root
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_end_matches('/');
+    let rewritten = if let Some(scheme_end) = ws_url.find("://") {
+        let after_scheme = scheme_end + 3;
+        let rest = &ws_url[after_scheme..];
+        if let Some(path_offset) = rest.find('/') {
+            let path_start = after_scheme + path_offset;
+            format!("{}{}{}", &ws_url[..after_scheme], expected_host, &ws_url[path_start..])
+        } else {
+            ws_url.to_string()
+        }
+    } else {
+        ws_url.to_string()
+    };
+
+    if rewritten != ws_url {
+        info!("CDP WebSocket 地址重写: {ws_url} → {rewritten}");
+    }
+
+    Ok(rewritten)
 }
 
 /// 通过 CDP WebSocket 抓取页面 body.innerText。
@@ -331,7 +377,7 @@ async fn fetch_text_via_cdp(ws_url: &str, url: &str) -> Result<String, String> {
     )
     .await;
 
-    // 等待 Page.domContentEventFired 或 Page.loadEventFired，同时消费 navigate 响应
+    // 等待 Page.loadEventFired（初始 HTML 及同步资源加载完毕）
     let load_wait = wait_for_page_load_event(&mut read, navigate_id, &session_id);
     match timeout(Duration::from_secs(15), load_wait).await {
         Ok(Ok(())) => {}
@@ -341,16 +387,115 @@ async fn fetch_text_via_cdp(ws_url: &str, url: &str) -> Result<String, String> {
         }
     }
 
-    // 5. 获取 document.body.innerText
+    // 5. 渐进式内容获取：先快速尝试，不足时再等待网络空闲后重取
+    let text = evaluate_body_text(&mut write, &mut read, &mut next_id, &session_id).await?;
+    if is_obscura_content_sufficient(&text) {
+        return Ok(text);
+    }
+
+    // 6. 初始内容不足（可能是 JS 异步渲染，如微信公众号文章），
+    //    继续监听 Page.lifecycleEvent 等待 networkIdle 信号后重新提取
+    warn!("Obscura 初始内容不足（{} 字），等待 networkIdle 后重取", text.chars().count());
+    match timeout(Duration::from_secs(10), wait_for_network_idle(&mut read, &session_id)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            warn!("等待 networkIdle 超时，将使用当前已有内容");
+        }
+    }
+
+    // networkIdle 后短暂等待 DOM 渲染
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let text = evaluate_body_text(&mut write, &mut read, &mut next_id, &session_id).await?;
+    if is_obscura_content_sufficient(&text) {
+        return Ok(text);
+    }
+
+    // 两次都拿不到有效内容，丢弃
+    warn!("Obscura 两次尝试均未获取到有效内容，丢弃");
+    Ok(String::new())
+}
+
+/// 判断 Obscura 抓取的内容是否足够有效（非空壳/加载中页面）。
+fn is_obscura_content_sufficient(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.chars().count() < 200 {
+        return false;
+    }
+    // 排除明显的加载中空壳
+    let lower = trimmed.to_lowercase();
+    let loading_markers = ["加载中", "loading", "请稍候", "正在加载"];
+    if trimmed.chars().count() < 500 && loading_markers.iter().any(|m| lower.contains(m)) {
+        return false;
+    }
+    true
+}
+
+/// 等待 `Page.lifecycleEvent` 中 `networkIdle` 信号（500ms 内无新网络请求）。
+async fn wait_for_network_idle(
+    read: &mut futures::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    >,
+    session_id: &str,
+) -> Result<(), String> {
+    while let Some(msg_result) = read.next().await {
+        match msg_result {
+            Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
+                let parsed: Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                let method = parsed.get("method").and_then(|v| v.as_str());
+                let sid = parsed.get("sessionId").and_then(|v| v.as_str());
+                if sid == Some(session_id) && method == Some("Page.lifecycleEvent") {
+                    if let Some(name) = parsed
+                        .get("params")
+                        .and_then(|p| p.get("name"))
+                        .and_then(|v| v.as_str())
+                    {
+                        if name == "networkIdle" {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            Ok(_) => continue,
+            Err(e) => return Err(format!("CDP WebSocket 读取错误: {e}")),
+        }
+    }
+    Err("CDP 连接在 networkIdle 前关闭".to_string())
+}
+
+/// 执行 `Runtime.evaluate` 提取页面正文。
+///
+/// 优先从微信文章的 `#js_content` 容器取内容（干净的文章文本），
+/// 不存在时回退到 `document.body.innerText`（通用页面）。
+async fn evaluate_body_text(
+    write: &mut futures::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::tungstenite::Message,
+    >,
+    read: &mut futures::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    >,
+    next_id: &mut i64,
+    session_id: &str,
+) -> Result<String, String> {
     let eval_id = send_cdp(
-        &mut write,
-        &mut next_id,
+        write,
+        next_id,
         "Runtime.evaluate",
         &json!({
-            "expression": "document.body ? document.body.innerText : ''",
+            "expression": "(() => { \
+                const el = document.querySelector('#js_content'); \
+                if (el && el.innerText.trim().length > 0) return el.innerText; \
+                return document.body ? document.body.innerText : ''; \
+            })()",
             "returnByValue": true
         }),
-        Some(&session_id),
+        Some(session_id),
     )
     .await;
 
@@ -480,6 +625,26 @@ async fn send_cdp(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "需要本地 Obscura CDP 服务运行在 127.0.0.1:9222"]
+    async fn test_obscura_fetch_wechat() {
+        unsafe {
+            std::env::set_var("OBSCURA_ENABLED", "true");
+            std::env::set_var("OBSCURA_FETCH_MODE", "always");
+        }
+
+        let url = "https://mp.weixin.qq.com/s/p66CLTNZ7vmQI0xQC5DrkA";
+        let result = fetch_with_obscura(url).await;
+        println!("=== Obscura 微信抓取结果 ===");
+        println!("长度: {} chars", result.chars().count());
+        println!("--- 内容 ---");
+        println!("{}", result.chars().take(5000).collect::<String>());
+        println!("=== END ===");
+
+        assert!(result.contains("GEO") && result.chars().count() > 1000,
+            "应抓到微信文章正文内容");
+    }
 
     #[tokio::test]
     #[ignore = "需要本地 Obscura CDP 服务运行在 127.0.0.1:9222"]
