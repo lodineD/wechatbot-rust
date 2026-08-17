@@ -89,11 +89,10 @@ fn format_items(items: &[RssItem]) -> String {
             item.pub_date,
         ));
         if !item.description.is_empty() {
-            // 去除 HTML 标签，保留纯文本摘要
+            // 去除 HTML 标签，保留完整纯文本
             let plain = strip_html(&item.description);
-            let summary = smart_truncate(&plain, 500);
-            if !summary.is_empty() {
-                buf.push_str(&format!("{summary}\n"));
+            if !plain.is_empty() {
+                buf.push_str(&format!("{plain}\n"));
             }
         }
         buf.push('\n');
@@ -155,38 +154,6 @@ fn strip_html(html: &str) -> String {
     collapsed
 }
 
-/// 智能截断文本：按字符数限制截断，但优先在单词/标点边界处切断，
-/// 避免中文句子被截在半句话，并以 "..." 提示后续还有内容。
-fn smart_truncate(text: &str, max_chars: usize) -> String {
-    let text = text.trim();
-    let count = text.chars().count();
-    if count <= max_chars {
-        return text.to_string();
-    }
-
-    // 先尝试在 max_chars 范围内找最后一个句末标点
-    let boundary_chars = ['。', '．', '.', '！', '!', '？', '?', '\n'];
-    let mut last_boundary: Option<usize> = None;
-    let mut current = 0;
-    for (idx, ch) in text.char_indices() {
-        if current >= max_chars {
-            break;
-        }
-        if boundary_chars.contains(&ch) {
-            last_boundary = Some(idx + ch.len_utf8());
-        }
-        current += 1;
-    }
-
-    if let Some(pos) = last_boundary {
-        let truncated = &text[..pos];
-        return format!("{truncated} ...");
-    }
-
-    // 没有标点，退化为在 max_chars 处截断并补 "..."
-    let truncated: String = text.chars().take(max_chars).collect();
-    format!("{truncated} ...")
-}
 
 #[cfg(test)]
 mod tests {
