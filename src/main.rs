@@ -25,14 +25,30 @@ async fn main() -> Result<()> {
 
     // 支持 --xhs-probe <关键词> 直接触发一次小红书搜索（用于验证 camoufox 全链路）
     let args: Vec<String> = std::env::args().collect();
+    let load_cookie = || {
+        std::fs::read_to_string("xhs_cookie.txt")
+            .or_else(|_| std::env::var("XHS_COOKIE")
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::NotFound, "无 XHS_COOKIE")))
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    // --xhs-detail-probe <URL> 用 HTTP 直连获取小红书笔记详情（走 xhs_note_detail 链路）
+    if let Some(pos) = args.iter().position(|a| a == "--xhs-detail-probe") {
+        if let Some(url) = args.get(pos + 1) {
+            info!("XHS 详情探测：{url}");
+            let cookie = load_cookie();
+            let result = xiaohongshu::xhs_note_detail(url, &cookie).await;
+            println!("===== 小红书笔记详情 =====\n{result}\n============================");
+            return Ok(());
+        }
+    }
+    // 支持 --xhs-probe <关键词> 直接触发一次小红书搜索（用于验证 camoufox 全链路）
     if let Some(pos) = args.iter().position(|a| a == "--xhs-probe") {
         if let Some(q) = args.get(pos + 1) {
             info!("XHS 探测模式：搜索「{q}」");
-            // 探测模式不依赖企业微信配置，直接从 xhs_cookie.txt 读取 Cookie
-            let cookie = std::fs::read_to_string("xhs_cookie.txt")
-                .or_else(|_| std::env::var("XHS_COOKIE").map_err(|_| std::io::Error::new(std::io::ErrorKind::NotFound, "无 XHS_COOKIE")))
-                .unwrap_or_default();
-            let result = xiaohongshu::xhs_search(q, 5, cookie.trim()).await;
+            let cookie = load_cookie();
+            let result = xiaohongshu::xhs_search(q, 5, &cookie).await;
             println!("===== 小红书搜索结果 =====\n{result}\n============================");
             return Ok(());
         }
