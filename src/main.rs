@@ -4,6 +4,10 @@ mod error;
 mod rss;
 mod search;
 mod wecom;
+mod xiaohongshu;
+
+#[cfg(all(unix, feature = "xhs-camoufox"))]
+mod camoufox_backend;
 
 use anyhow::Result;
 use config::AppConfig;
@@ -19,6 +23,21 @@ async fn main() -> Result<()> {
     // 尝试从多个位置加载 .env
     load_dotenv();
 
+    // 支持 --xhs-probe <关键词> 直接触发一次小红书搜索（用于验证 camoufox 全链路）
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args.iter().position(|a| a == "--xhs-probe") {
+        if let Some(q) = args.get(pos + 1) {
+            info!("XHS 探测模式：搜索「{q}」");
+            // 探测模式不依赖企业微信配置，直接从 xhs_cookie.txt 读取 Cookie
+            let cookie = std::fs::read_to_string("xhs_cookie.txt")
+                .or_else(|_| std::env::var("XHS_COOKIE").map_err(|_| std::io::Error::new(std::io::ErrorKind::NotFound, "无 XHS_COOKIE")))
+                .unwrap_or_default();
+            let result = xiaohongshu::xhs_search(q, 5, cookie.trim()).await;
+            println!("===== 小红书搜索结果 =====\n{result}\n============================");
+            return Ok(());
+        }
+    }
+
     info!("原始 env: DAILY_NEWS_CHAT_ID = {:?}", std::env::var("DAILY_NEWS_CHAT_ID"));
 
     info!("正在启动 wechatbot-rust...");
@@ -30,11 +49,13 @@ async fn main() -> Result<()> {
     let deepseek = DeepseekClient::new(
         config.deepseek_api_key,
         config.deepseek_system_prompt,
-    );
+    )
+    .with_xhs(config.xhs_enabled, config.xhs_cookie.clone());
 
     // 初始化并运行企业微信机器人
     let chat_id = config.daily_news_chat_id.clone();
-    info!("配置加载完成, DAILY_NEWS_CHAT_ID = {:?}", chat_id);
+    let xhs_on = config.xhs_enabled;
+    info!("配置加载完成, DAILY_NEWS_CHAT_ID = {:?}, XHS_ENABLED = {xhs_on}", chat_id);
 
     let bot = WecomBot::new(config.wechat_bot_id, config.wechat_bot_secret, deepseek);
     bot.run(chat_id).await?;

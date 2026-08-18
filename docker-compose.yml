@@ -31,10 +31,19 @@ services:
       - OBSCURA_ENABLED=true
       - OBSCURA_CDP_URL=http://obscura:9222
       - OBSCURA_FETCH_MODE=fallback
+    volumes:
+      # 挂载小红书 Cookie（避免塞进 .env 破坏解析，也便于过期替换）
+      - ./xhs_cookie.txt:/app/xhs_cookie.txt:ro
     depends_on:
       - obscura
     networks:
       - wechatbot-net
+    # camoufox/firefox 需要在 Docker 里运行沙箱，需要额外权限
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp:unconfined
+    shm_size: "1gb"
 
 networks:
   wechatbot-net:

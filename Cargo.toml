@@ -23,6 +23,15 @@ futures = "0.3"
 rust-websearch = "0.1"
 tokio-tungstenite = "0.21"
 chrono = "0.4"
+urlencoding = "2"
+
+# Camoufox 浏览器自动化（仅 Unix）
+[target.'cfg(unix)'.dependencies]
+camoufox = { path = "camoufox-rs" }
+
+[features]
+default = []
+xhs-camoufox = []  # 启用 camoufox-rs 的小红书搜索
 
 [profile.release]
 opt-level = 3

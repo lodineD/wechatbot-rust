@@ -22,3 +22,6 @@ target
 
 # Local environment variables
 .env
+
+# 小红书 Cookie（敏感凭据，勿提交）
+xhs_cookie.txt
