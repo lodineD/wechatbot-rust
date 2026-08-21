@@ -6,7 +6,7 @@
 
 use futures::{SinkExt, StreamExt};
 use reqwest::Client as HttpClient;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -243,17 +243,12 @@ async fn create_cdp_session(ws_url: &str) -> Result<CdpSession, String> {
                     if let Ok(parsed) = serde_json::from_str::<Value>(&text) {
                         if let Some(id) = parsed.get("id").and_then(|v| v.as_i64()) {
                             let _ = cmd_tx_reader.send(CdpResponse { id, value: parsed });
-                        } else if let Some(method) =
-                            parsed.get("method").and_then(|v| v.as_str())
-                        {
+                        } else if let Some(method) = parsed.get("method").and_then(|v| v.as_str()) {
                             let session_id = parsed
                                 .get("sessionId")
                                 .and_then(|v| v.as_str())
                                 .map(String::from);
-                            let params = parsed
-                                .get("params")
-                                .cloned()
-                                .unwrap_or(Value::Null);
+                            let params = parsed.get("params").cloned().unwrap_or(Value::Null);
                             let _ = event_tx.send(CdpEvent {
                                 method: method.to_string(),
                                 session_id,
@@ -278,8 +273,16 @@ async fn create_cdp_session(ws_url: &str) -> Result<CdpSession, String> {
     let mut next_id: i64 = 1;
 
     // Target.createTarget
-    let create_id = send_raw(&mut write, &mut next_id, "Target.createTarget", &json!({ "url": "about:blank" }), None).await;
-    let target_id = wait_cmd(&mut cmd_rx, &cmd_tx, create_id, 10).await?
+    let create_id = send_raw(
+        &mut write,
+        &mut next_id,
+        "Target.createTarget",
+        &json!({ "url": "about:blank" }),
+        None,
+    )
+    .await;
+    let target_id = wait_cmd(&mut cmd_rx, &cmd_tx, create_id, 10)
+        .await?
         .get("result")
         .and_then(|r| r.get("targetId"))
         .and_then(|v| v.as_str())
@@ -288,14 +291,25 @@ async fn create_cdp_session(ws_url: &str) -> Result<CdpSession, String> {
     info!("[XHS] target 创建: {target_id}");
 
     // Target.attachToTarget
-    let attach_id = send_raw(&mut write, &mut next_id, "Target.attachToTarget", &json!({ "targetId": target_id, "flatten": true }), None).await;
-    let session_id = wait_cmd(&mut cmd_rx, &cmd_tx, attach_id, 10).await?
+    let attach_id = send_raw(
+        &mut write,
+        &mut next_id,
+        "Target.attachToTarget",
+        &json!({ "targetId": target_id, "flatten": true }),
+        None,
+    )
+    .await;
+    let session_id = wait_cmd(&mut cmd_rx, &cmd_tx, attach_id, 10)
+        .await?
         .get("result")
         .and_then(|r| r.get("sessionId"))
         .and_then(|v| v.as_str())
         .map(String::from)
         .ok_or("Target.attachToTarget 未返回 sessionId")?;
-    info!("[XHS] session 建立: {}...", &session_id[..16.min(session_id.len())]);
+    info!(
+        "[XHS] session 建立: {}...",
+        &session_id[..16.min(session_id.len())]
+    );
 
     Ok(CdpSession {
         write,
@@ -311,16 +325,25 @@ async fn create_cdp_session(ws_url: &str) -> Result<CdpSession, String> {
 impl CdpSession {
     /// 发送 CDP 命令并等待响应（短超时，配合轮询使用）。
     async fn send_cmd(&mut self, method: &str, params: &Value) -> Result<Value, String> {
-        let msg_id = send_raw(&mut self.write, &mut self.next_id, method, params, Some(&self.session_id)).await;
-        wait_cmd(&mut self.cmd_rx, &self.cmd_tx, msg_id, 5).await  // 5秒超时，不阻塞轮询
+        let msg_id = send_raw(
+            &mut self.write,
+            &mut self.next_id,
+            method,
+            params,
+            Some(&self.session_id),
+        )
+        .await;
+        wait_cmd(&mut self.cmd_rx, &self.cmd_tx, msg_id, 5).await // 5秒超时，不阻塞轮询
     }
 
     /// 执行 JS 表达式，返回字符串结果。
     async fn evaluate(&mut self, expression: &str) -> Result<String, String> {
-        let resp = self.send_cmd(
-            "Runtime.evaluate",
-            &json!({ "expression": expression, "returnByValue": true }),
-        ).await?;
+        let resp = self
+            .send_cmd(
+                "Runtime.evaluate",
+                &json!({ "expression": expression, "returnByValue": true }),
+            )
+            .await?;
 
         if let Some(error) = resp.get("error") {
             return Err(format!("JS 执行错误: {error}"));
@@ -371,7 +394,12 @@ impl CdpSession {
 
             attempt += 1;
             match self.evaluate(check_js).await {
-                Ok(result) if !result.is_empty() && result != "null" && result != "[]" && result != "{}" => {
+                Ok(result)
+                    if !result.is_empty()
+                        && result != "null"
+                        && result != "[]"
+                        && result != "{}" =>
+                {
                     return Ok(result);
                 }
                 Ok(_) => {
@@ -434,14 +462,18 @@ async fn wait_cmd(
     loop {
         let remaining = deadline.duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            for resp in stash { let _ = cmd_tx.send(resp); }
+            for resp in stash {
+                let _ = cmd_tx.send(resp);
+            }
             return Err(format!("等待 CDP 响应超时 (id={expected_id})"));
         }
 
         match timeout(remaining, rx.recv()).await {
             Ok(Some(resp)) => {
                 if resp.id == expected_id {
-                    for r in stash { let _ = cmd_tx.send(r); }
+                    for r in stash {
+                        let _ = cmd_tx.send(r);
+                    }
                     if let Some(error) = resp.value.get("error") {
                         return Err(format!("CDP 命令错误: {error}"));
                     }
@@ -451,11 +483,15 @@ async fn wait_cmd(
                 }
             }
             Ok(None) => {
-                for r in stash { let _ = cmd_tx.send(r); }
+                for r in stash {
+                    let _ = cmd_tx.send(r);
+                }
                 return Err("CDP 命令通道已关闭".to_string());
             }
             Err(_) => {
-                for r in stash { let _ = cmd_tx.send(r); }
+                for r in stash {
+                    let _ = cmd_tx.send(r);
+                }
                 return Err(format!("等待 CDP 响应超时 (id={expected_id})"));
             }
         }
@@ -479,13 +515,17 @@ async fn search_via_cdp(
     // 1. 启用 Runtime + Page（不启用 Network，避免事件洪泛）
     cdp.send_cmd("Runtime.enable", &json!({})).await?;
     cdp.send_cmd("Page.enable", &json!({})).await?;
-    info!("[XHS] Runtime/Page 已启用 ({}ms)", start.elapsed().as_millis());
+    info!(
+        "[XHS] Runtime/Page 已启用 ({}ms)",
+        start.elapsed().as_millis()
+    );
 
     // 2. 注入反检测脚本（必须在任何导航之前）
     cdp.send_cmd(
         "Page.addScriptToEvaluateOnNewDocument",
         &json!({ "source": STEALTH_JS }),
-    ).await?;
+    )
+    .await?;
     info!("[XHS] 反检测脚本已注入");
 
     // 3. 设置视口尺寸（避免 0x0 暴露 headless）
@@ -497,7 +537,8 @@ async fn search_via_cdp(
             "deviceScaleFactor": 1,
             "mobile": false
         }),
-    ).await?;
+    )
+    .await?;
     info!("[XHS] 视口已设置为 1920x1080");
 
     // 4. 设置 User-Agent
@@ -521,8 +562,13 @@ async fn search_via_cdp(
                     json!({ "name": name, "value": value, "domain": XHS_DOMAIN, "path": "/" })
                 }).collect::<Vec<_>>()
             }),
-        ).await?;
-        info!("[XHS] Cookie 注入: {} 个 [{}]", cookies.len(), cookie_names.join(", "));
+        )
+        .await?;
+        info!(
+            "[XHS] Cookie 注入: {} 个 [{}]",
+            cookies.len(),
+            cookie_names.join(", ")
+        );
     }
 
     // 4. 导航到首页建立会话（不等待 CDP 响应，靠轮询判断）
@@ -533,8 +579,9 @@ async fn search_via_cdp(
     random_delay_ms(2000, 3000).await;
 
     // 5. 验证登录状态
-    let login_check = cdp.evaluate(
-        "(() => { \
+    let login_check = cdp
+        .evaluate(
+            "(() => { \
             try { \
                 const s = window.__INITIAL_STATE__; \
                 if (!s || !s.user) return JSON.stringify({has_state: false, logged_in: false}); \
@@ -543,12 +590,20 @@ async fn search_via_cdp(
                 return JSON.stringify({has_state: true, logged_in: !!u, \
                     user_keys: Object.keys(s.user || {}).slice(0, 10).join(',')}); \
             } catch(e) { return JSON.stringify({has_state: false, error: e.message}); } \
-        })()"
-    ).await.unwrap_or_default();
+        })()",
+        )
+        .await
+        .unwrap_or_default();
 
     let login_info: Value = serde_json::from_str(&login_check).unwrap_or_default();
-    let logged_in = login_info.get("logged_in").and_then(|v| v.as_bool()).unwrap_or(false);
-    let has_state = login_info.get("has_state").and_then(|v| v.as_bool()).unwrap_or(false);
+    let logged_in = login_info
+        .get("logged_in")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let has_state = login_info
+        .get("has_state")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     info!("[XHS] 登录验证: has_state={has_state}, logged_in={logged_in}, raw={login_check}");
 
     if !logged_in {
@@ -591,7 +646,11 @@ async fn search_via_cdp(
     info!("[XHS] 开始轮询等待 Vue 搜索数据...");
     match cdp.poll_for_data(&wait_js, 1500, 20).await {
         Ok(json_str) => {
-            info!("[XHS] ✓ 获取到搜索数据 ({}ms), {} bytes", start.elapsed().as_millis(), json_str.len());
+            info!(
+                "[XHS] ✓ 获取到搜索数据 ({}ms), {} bytes",
+                start.elapsed().as_millis(),
+                json_str.len()
+            );
             let items = parse_search_json(&json_str);
             info!("[XHS] 解析到 {} 条搜索结果", items.len());
             cdp.close().await;
@@ -619,8 +678,14 @@ async fn search_via_cdp(
             cdp.close().await;
 
             let diag_v: Value = serde_json::from_str(&diag).unwrap_or_default();
-            if diag_v.get("hasLogin").and_then(|v| v.as_bool()).unwrap_or(false)
-                || diag_v.get("hasCaptcha").and_then(|v| v.as_bool()).unwrap_or(false)
+            if diag_v
+                .get("hasLogin")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                || diag_v
+                    .get("hasCaptcha")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
             {
                 Err("检测到登录弹窗或验证码，Cookie 可能已失效".to_string())
             } else {
@@ -710,19 +775,39 @@ fn parse_note_from_html(html: &str, note_url: &str) -> String {
         None => return format!("（页面「{note_url}」中笔记对象为空）"),
     };
 
-    let title = note.get("title").and_then(|v| v.as_str()).unwrap_or("(无标题)");
+    let title = note
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(无标题)");
     let desc = note.get("desc").and_then(|v| v.as_str()).unwrap_or("");
-    let author = note.get("user").and_then(|u| u.get("nickname")).and_then(|v| v.as_str()).unwrap_or("未知");
-    let note_type = note.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let author = note
+        .get("user")
+        .and_then(|u| u.get("nickname"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("未知");
+    let note_type = note
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
 
     let interact = note.get("interactInfo");
-    let likes = interact.and_then(|i| i.get("likedCount")).and_then(|v| v.as_str()).unwrap_or("");
-    let comments = interact.and_then(|i| i.get("commentCount")).and_then(|v| v.as_str()).unwrap_or("");
+    let likes = interact
+        .and_then(|i| i.get("likedCount"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let comments = interact
+        .and_then(|i| i.get("commentCount"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     let tags: Vec<&str> = note
         .get("tagList")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|t| t.get("name").and_then(|n| n.as_str())).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+                .collect()
+        })
         .unwrap_or_default();
 
     let images: Vec<&str> = note
@@ -730,7 +815,11 @@ fn parse_note_from_html(html: &str, note_url: &str) -> String {
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|img| img.get("urlDefault").or_else(|| img.get("url")).and_then(|v| v.as_str()))
+                .filter_map(|img| {
+                    img.get("urlDefault")
+                        .or_else(|| img.get("url"))
+                        .and_then(|v| v.as_str())
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -763,7 +852,10 @@ fn parse_note_from_html(html: &str, note_url: &str) -> String {
 
 fn format_search_results(query: &str, items: &[XhsSearchItem]) -> String {
     let mut buf = String::new();
-    buf.push_str(&format!("📕 小红书搜索「{query}」结果（共 {} 条）：\n", items.len()));
+    buf.push_str(&format!(
+        "📕 小红书搜索「{query}」结果（共 {} 条）：\n",
+        items.len()
+    ));
     for (i, item) in items.iter().enumerate() {
         buf.push_str(&format!("\n[{}.] {}", i + 1, item.title));
         if !item.author.is_empty() {
@@ -806,9 +898,11 @@ fn replace_word_boundary(input: &str, word: &str, replacement: &str) -> String {
     let bytes = input.as_bytes();
     while let Some(rel_pos) = input[search_from..].find(word) {
         let pos = search_from + rel_pos;
-        let before_ok = pos == 0 || (!bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_');
+        let before_ok =
+            pos == 0 || (!bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_');
         let after_pos = pos + word.len();
-        let after_ok = after_pos >= bytes.len() || (!bytes[after_pos].is_ascii_alphanumeric() && bytes[after_pos] != b'_');
+        let after_ok = after_pos >= bytes.len()
+            || (!bytes[after_pos].is_ascii_alphanumeric() && bytes[after_pos] != b'_');
         result.push_str(&input[search_from..pos]);
         if before_ok && after_ok && !is_inside_json_string(&input[..pos]) {
             result.push_str(replacement);
@@ -825,9 +919,17 @@ fn is_inside_json_string(prefix: &str) -> bool {
     let mut in_string = false;
     let mut escape = false;
     for ch in prefix.chars() {
-        if escape { escape = false; continue; }
-        if ch == '\\' { escape = true; continue; }
-        if ch == '"' { in_string = !in_string; }
+        if escape {
+            escape = false;
+            continue;
+        }
+        if ch == '\\' {
+            escape = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+        }
     }
     in_string
 }
@@ -859,7 +961,11 @@ pub fn parse_cookie_string(cookie: &str) -> Vec<(String, String)> {
             let eq_pos = pair.find('=')?;
             let name = pair[..eq_pos].trim().to_string();
             let value = pair[eq_pos + 1..].trim().to_string();
-            if name.is_empty() { None } else { Some((name, value)) }
+            if name.is_empty() {
+                None
+            } else {
+                Some((name, value))
+            }
         })
         .collect()
 }
@@ -900,7 +1006,12 @@ async fn get_browser_ws_url(cdp_root: &str) -> Result<String, String> {
         let rest = &ws_url[after_scheme..];
         if let Some(path_offset) = rest.find('/') {
             let path_start = after_scheme + path_offset;
-            format!("{}{}{}", &ws_url[..after_scheme], expected_host, &ws_url[path_start..])
+            format!(
+                "{}{}{}",
+                &ws_url[..after_scheme],
+                expected_host,
+                &ws_url[path_start..]
+            )
         } else {
             ws_url.to_string()
         }
@@ -938,7 +1049,9 @@ mod tests {
     #[test]
     fn test_normalize_note_url() {
         assert_eq!(
-            normalize_note_url("https://www.xiaohongshu.com/explore/6a3346880000000021014789?xsec_token=abc"),
+            normalize_note_url(
+                "https://www.xiaohongshu.com/explore/6a3346880000000021014789?xsec_token=abc"
+            ),
             "https://www.xiaohongshu.com/explore/6a3346880000000021014789?xsec_token=abc"
         );
         assert_eq!(

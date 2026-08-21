@@ -12,8 +12,8 @@ mod camoufox_backend;
 use anyhow::Result;
 use config::AppConfig;
 use deepseek::DeepseekClient;
-use tracing::{info, warn};
-use wecom::WecomBot;
+use tracing::{error, info, warn};
+use wecom::{ReminderScene, WecomBot};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,8 +27,10 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let load_cookie = || {
         std::fs::read_to_string("xhs_cookie.txt")
-            .or_else(|_| std::env::var("XHS_COOKIE")
-                .map_err(|_| std::io::Error::new(std::io::ErrorKind::NotFound, "无 XHS_COOKIE")))
+            .or_else(|_| {
+                std::env::var("XHS_COOKIE")
+                    .map_err(|_| std::io::Error::new(std::io::ErrorKind::NotFound, "无 XHS_COOKIE"))
+            })
             .unwrap_or_default()
             .trim()
             .to_string()
@@ -54,7 +56,90 @@ async fn main() -> Result<()> {
         }
     }
 
-    info!("原始 env: DAILY_NEWS_CHAT_ID = {:?}", std::env::var("DAILY_NEWS_CHAT_ID"));
+    // --send-test <userid> 向指定用户发送测试消息（验证单聊推送）
+    if let Some(pos) = args.iter().position(|a| a == "--test-reminder") {
+        let scene = match args.get(pos + 1).map(String::as_str) {
+            Some("morning") => ReminderScene::Morning,
+            Some("lunch") => ReminderScene::Lunch,
+            Some("dinner") => ReminderScene::Dinner,
+            _ => anyhow::bail!("用法: --test-reminder <morning|lunch|dinner>"),
+        };
+        let config = AppConfig::from_env()?;
+        let target_user_id = config.special_user_id.clone();
+        let deepseek = DeepseekClient::new(config.deepseek_api_key, config.deepseek_system_prompt)
+            .with_special_user(target_user_id.clone());
+        let bot = WecomBot::new(config.wechat_bot_id, config.wechat_bot_secret, deepseek);
+        let message = bot.test_reminder(&target_user_id, scene).await?;
+        println!("===== 定时提醒测试已发送 =====\n{message}");
+        return Ok(());
+    }
+
+    if args.iter().any(|arg| arg == "--test-rss") {
+        let config = AppConfig::from_env()?;
+        let target_user_id = config.special_user_id.clone();
+        let deepseek = DeepseekClient::new(config.deepseek_api_key, config.deepseek_system_prompt)
+            .with_special_user(target_user_id.clone());
+        let bot = WecomBot::new(config.wechat_bot_id, config.wechat_bot_secret, deepseek);
+        bot.test_rss(&target_user_id).await?;
+        println!("===== RSS 单聊测试已发送 =====");
+        return Ok(());
+    }
+
+    if let Some(pos) = args.iter().position(|a| a == "--send") {
+        let userid = args.get(pos + 1).filter(|v| !v.trim().is_empty());
+        let message = args.get(pos + 2).filter(|v| !v.is_empty());
+        match (userid, message) {
+            (Some(userid), Some(message)) => {
+                send_one_message(userid, message).await?;
+                return Ok(());
+            }
+            _ => anyhow::bail!("用法: --send <userid> <message>"),
+        }
+    }
+
+    if let Some(pos) = args.iter().position(|a| a == "--send-test") {
+        if let Some(userid) = args.get(pos + 1) {
+            info!("发送测试模式：向 {userid} 发送 '你好'");
+            let config = AppConfig::from_env()?;
+            let client =
+                wecom_aibot_rust_sdk::WSClient::new(wecom_aibot_rust_sdk::WSClientOptions::new(
+                    config.wechat_bot_id,
+                    config.wechat_bot_secret,
+                ));
+
+            // 连接 WebSocket
+            client.connect().await?;
+            info!("已连接到企业微信");
+
+            // 发送测试消息（主动推送必须用 markdown，text 会报 40008）
+            let body = serde_json::json!({
+                "msgtype": "markdown",
+                "markdown": {
+                    "content": "你好！这是一条测试消息 🎉"
+                }
+            });
+
+            match client.send_message(userid, body).await {
+                Ok(_) => {
+                    info!("✓ 消息发送成功");
+                    println!("===== 测试消息已发送给 {userid} =====");
+                }
+                Err(e) => {
+                    error!("✗ 发送失败: {e}");
+                    eprintln!("===== 发送失败 =====\n错误: {e}");
+                }
+            }
+
+            // 断开连接
+            client.disconnect_async().await;
+            return Ok(());
+        }
+    }
+
+    info!(
+        "原始 env: DAILY_NEWS_CHAT_ID = {:?}",
+        std::env::var("DAILY_NEWS_CHAT_ID")
+    );
 
     info!("正在启动 wechatbot-rust...");
 
@@ -62,20 +147,40 @@ async fn main() -> Result<()> {
     let config = AppConfig::from_env()?;
 
     // 初始化 DeepSeek 客户端
-    let deepseek = DeepseekClient::new(
-        config.deepseek_api_key,
-        config.deepseek_system_prompt,
-    )
-    .with_xhs(config.xhs_enabled, config.xhs_cookie.clone());
+    let deepseek = DeepseekClient::new(config.deepseek_api_key, config.deepseek_system_prompt)
+        .with_xhs(config.xhs_enabled, config.xhs_cookie.clone())
+        .with_special_user(config.special_user_id.clone());
 
     // 初始化并运行企业微信机器人
-    let chat_id = config.daily_news_chat_id.clone();
+    let target_user_id = config.special_user_id.clone();
     let xhs_on = config.xhs_enabled;
-    info!("配置加载完成, DAILY_NEWS_CHAT_ID = {:?}, XHS_ENABLED = {xhs_on}", chat_id);
+    info!(
+        "配置加载完成, DAILY_NEWS_CHAT_ID = {:?}, XHS_ENABLED = {xhs_on}",
+        target_user_id
+    );
 
     let bot = WecomBot::new(config.wechat_bot_id, config.wechat_bot_secret, deepseek);
-    bot.run(chat_id).await?;
+    bot.run(target_user_id).await?;
 
+    Ok(())
+}
+
+async fn send_one_message(userid: &str, message: &str) -> Result<()> {
+    info!("主动发送消息给 {userid}");
+    let config = AppConfig::from_env()?;
+    let client = wecom_aibot_rust_sdk::WSClient::new(wecom_aibot_rust_sdk::WSClientOptions::new(
+        config.wechat_bot_id,
+        config.wechat_bot_secret,
+    ));
+    client.connect().await?;
+    let body = serde_json::json!({
+        "msgtype": "markdown",
+        "markdown": { "content": message }
+    });
+    let result = client.send_message(userid, body).await;
+    client.disconnect_async().await;
+    result?;
+    println!("===== 消息已发送给 {userid} =====");
     Ok(())
 }
 

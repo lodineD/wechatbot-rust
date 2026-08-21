@@ -23,7 +23,11 @@ pub async fn fetch_rust_news(http: &HttpClient) -> String {
                 let items = parse_items(&body);
                 let today_items: Vec<_> = items
                     .into_iter()
-                    .filter(|item| parse_pub_date(&item.pub_date).map(|d| d == today).unwrap_or(false))
+                    .filter(|item| {
+                        parse_pub_date(&item.pub_date)
+                            .map(|d| d == today)
+                            .unwrap_or(false)
+                    })
                     .collect();
                 format_items(&today_items)
             }
@@ -78,7 +82,10 @@ fn format_items(items: &[RssItem]) -> String {
     info!("RSS 共解析 {} 条今日资讯", items.len());
 
     let mut buf = String::new();
-    buf.push_str(&format!("📰 今日 Rust.cc 资讯（共 {} 条）\n\n", items.len()));
+    buf.push_str(&format!(
+        "📰 今日 Rust.cc 资讯（共 {} 条）\n\n",
+        items.len()
+    ));
 
     for (i, item) in items.iter().enumerate() {
         buf.push_str(&format!(
@@ -154,7 +161,6 @@ fn strip_html(html: &str) -> String {
     collapsed
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,13 +175,19 @@ mod tests {
     fn test_extract_tag() {
         let block = "<item><title>Test Title</title><link>http://example.com</link></item>";
         assert_eq!(extract_tag(block, "title"), Some("Test Title".to_string()));
-        assert_eq!(extract_tag(block, "link"), Some("http://example.com".to_string()));
+        assert_eq!(
+            extract_tag(block, "link"),
+            Some("http://example.com".to_string())
+        );
     }
 
     #[test]
     fn test_extract_tag_cdata() {
         let block = "<item><description><![CDATA[<p>Hello <b>world</b></p>]]></description></item>";
-        assert_eq!(extract_tag(block, "description"), Some("<p>Hello <b>world</b></p>".to_string()));
+        assert_eq!(
+            extract_tag(block, "description"),
+            Some("<p>Hello <b>world</b></p>".to_string())
+        );
     }
 
     #[test]
@@ -186,12 +198,19 @@ mod tests {
         let items = parse_items(xml);
         let today_items: Vec<_> = items
             .into_iter()
-            .filter(|item| parse_pub_date(&item.pub_date).map(|d| d == today).unwrap_or(false))
+            .filter(|item| {
+                parse_pub_date(&item.pub_date)
+                    .map(|d| d == today)
+                    .unwrap_or(false)
+            })
             .collect();
         let output = format_items(&today_items);
         println!("{}", output);
 
-        assert!(output.contains("Rust.cc 资讯（共 1 条）"), "应该只解析出 1 条今日资讯");
+        assert!(
+            output.contains("Rust.cc 资讯（共 1 条）"),
+            "应该只解析出 1 条今日资讯"
+        );
         assert!(output.contains("Bevy 六周年"), "应包含今日标题");
         assert!(!output.contains("RMQTT 版本更新"), "不应包含昨日资讯");
     }
@@ -213,9 +232,6 @@ mod tests {
             !content.contains("今天没有日报，好好休息吧，主人"),
             "真实 RSS 应该有内容，但解析为空"
         );
-        assert!(
-            content.contains("Rust.cc 资讯"),
-            "输出应包含标题"
-        );
+        assert!(content.contains("Rust.cc 资讯"), "输出应包含标题");
     }
 }

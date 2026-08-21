@@ -1,50 +1,21 @@
 services:
-  obscura:
-    image: wechatbot-rust-obscura:latest
-    build:
-      context: ./obscura
-      dockerfile: Dockerfile
-    container_name: obscura
-    ports:
-      # 仅绑定到本地回环，避免外部网络直接访问 CDP 端口。
-      # 容器间通信走 bridge 网络，不依赖这个端口映射。
-      - "127.0.0.1:9222:9222"
-    networks:
-      - wechatbot-net
-    healthcheck:
-      test: ["CMD", "/obscura", "fetch", "https://example.com", "--dump", "text", "--timeout", "5"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
   wechatbot:
     image: wechatbot-rust-wechatbot:latest
     build:
       context: .
       dockerfile: Dockerfile
     container_name: wechatbot-rust
+    restart: unless-stopped
     env_file:
       - .env
     environment:
-      # 在 Docker 桥接网络内通过服务名访问 Obscura
-      - OBSCURA_ENABLED=true
-      - OBSCURA_CDP_URL=http://obscura:9222
-      - OBSCURA_FETCH_MODE=fallback
+      TZ: Asia/Shanghai
+      SPECIAL_USER_ID: "15771075163"
+      XHS_ENABLED: "true"
     volumes:
-      # 挂载小红书 Cookie（避免塞进 .env 破坏解析，也便于过期替换）
       - ./xhs_cookie.txt:/app/xhs_cookie.txt:ro
-    depends_on:
-      - obscura
-    networks:
-      - wechatbot-net
-    # camoufox/firefox 需要在 Docker 里运行沙箱，需要额外权限
     cap_add:
       - SYS_ADMIN
     security_opt:
       - seccomp:unconfined
     shm_size: "1gb"
-
-networks:
-  wechatbot-net:
-    driver: bridge

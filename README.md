@@ -1,5 +1,15 @@
 # wechatbot-rust
 
+## 专属用户与定时任务
+
+- `SPECIAL_USER_ID` 默认为 `15771075163`；该用户与机器人聊天时使用专属女仆角色并称呼“主人”。
+- 每天按 `Asia/Shanghai` 时区在 09:00、12:00、18:00 生成不固定的 AI 问候或用餐提醒。
+- Rust.cc RSS 每天 12:00（Asia/Shanghai）主动发送给 `SPECIAL_USER_ID`，不再发送到群聊。
+- 测试命令：`--test-reminder morning|lunch|dinner` 和 `--test-rss`。
+- Docker 启动：`docker compose up -d --build`。
+
+主动发送消息：`cargo run -- --send 15771075163 "你好，这是一条主动消息"`
+
 一个基于 Rust 的企业微信智能机器人 Agent，接入 DeepSeek 大模型实现自动回复，支持自动联网搜索、网页内容抓取和每日 Rust 资讯定时推送。
 
 ## 功能
@@ -9,7 +19,7 @@
 - **自动联网搜索**：通过 DeepSeek Tool Calling 调用 `web_search` 工具，自动搜索并把结果注入对话。
 - **网页内容抓取**：通过 DeepSeek Tool Calling 调用 `fetch` 工具，自动抓取页面内容并返回摘要。
 - **Obscura 反爬 fallback**：当普通抓取遇到反爬页面时，可启用 [Obscura](https://github.com/h4ckf0r0day/obscura) headless 浏览器重新抓取。
-- **每日 Rust 资讯推送**：每天本地时间 09:10 向指定群聊推送 [Rust.cc](https://rustcc.cn/) 日报（RSS）。
+- **每日 Rust 资讯推送**：每天上海时间 12:00 向专属用户推送 [Rust.cc](https://rustcc.cn/) 日报（RSS）。
 - 将 DeepSeek 的回复通过企业微信智能机器人通道流式返回给用户。
 
 ## 项目结构
@@ -99,7 +109,7 @@ docker compose down
 | `WECHAT_BOT_SECRET` | 是 | 企业微信智能机器人 Secret |
 | `DEEPSEEK_API_KEY` | 是 | DeepSeek API Key |
 | `DEEPSEEK_SYSTEM_PROMPT` | 否 | 系统提示词，默认“你是一个 helpful 的 AI 助手”。含空格时请用双引号包裹 |
-| `DAILY_NEWS_CHAT_ID` | 否 | 定时推送 Rust 日报的目标群聊 chatid，留空则不启用 |
+| `SPECIAL_USER_ID` | 否 | 专属用户 ID，默认 `15771075163`，用于女仆回复、RSS 和定时提醒 |
 | `RUST_LOG` | 否 | 日志级别，默认 `info` |
 | `OBSCURA_ENABLED` | 否 | 设为 `true` 时启用 Obscura 抓取 fallback。使用 Docker Compose 时已默认开启 |
 | `OBSCURA_CDP_URL` | 否 | Obscura CDP 服务器地址。Docker Compose 中默认 `http://obscura:9222`；本地独立运行 Obscura 时使用 `http://127.0.0.1:9222` |
@@ -109,14 +119,13 @@ docker compose down
 
 开启步骤：
 
-1. 在企业微信后台获取目标群聊的 `chatid`。
-2. 在 `.env` 中设置：
+1. 在 `.env` 中设置专属用户：
    ```env
-   DAILY_NEWS_CHAT_ID=your_chat_id_here
+   SPECIAL_USER_ID=15771075163
    ```
-3. 重新启动程序。
+2. 重新启动程序。
 
-程序会在每天本地时间 09:10 自动抓取 [Rust.cc RSS](https://rustcc.cn/rss) 并推送到指定群聊。
+程序会在每天上海时间 12:00 自动抓取 [Rust.cc RSS](https://rustcc.cn/rss) 并推送给专属用户。
 
 ## 注意事项
 

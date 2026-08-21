@@ -25,3 +25,11 @@ target
 
 # 小红书 Cookie（敏感凭据，勿提交）
 xhs_cookie.txt
+
+# 本机辅助/临时文件（勿提交）
+*.tar
+.tmp/
+
+# Agent 配置（勿提交）
+AGENTS.md
+CLAUDE.md

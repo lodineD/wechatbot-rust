@@ -228,6 +228,12 @@ impl WSClient {
         self.logger.info("Disconnected");
     }
 
+    /// 断开 WebSocket 连接（异步版本，安全在 async runtime 内调用）
+    pub async fn disconnect_async(&self) {
+        self.ws_manager.disconnect_async().await;
+        self.logger.info("Disconnected");
+    }
+
     /// 通过 WebSocket 通道发送回复消息（通用方法）
     ///
     /// # Arguments

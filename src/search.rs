@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use futures::{SinkExt, StreamExt};
-use rust_websearch::{fetch_page, search, FetchConfig, SearchConfig};
-use serde_json::{json, Value};
+use rust_websearch::{FetchConfig, SearchConfig, fetch_page, search};
+use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::time::timeout;
 use tokio_tungstenite::connect_async;
@@ -107,9 +107,7 @@ async fn fetch_with_default(url: &str) -> String {
         Ok(page) => {
             info!(
                 "抓取页面成功: {} ({} bytes, title={})",
-                page.final_url,
-                page.content_length,
-                page.title
+                page.final_url, page.content_length, page.title
             );
 
             if page.content.trim().is_empty() {
@@ -214,10 +212,7 @@ fn obscura_enabled() -> bool {
 /// 这些页面依赖 JS 动态渲染，servo-fetch / scraper 无法提取到可读内容。
 fn needs_obscura_domain(url: &str) -> bool {
     let lower = url.to_lowercase();
-    const DOMAINS: &[&str] = &[
-        "mp.weixin.qq.com",
-        "weixin.qq.com",
-    ];
+    const DOMAINS: &[&str] = &["mp.weixin.qq.com", "weixin.qq.com"];
     DOMAINS.iter().any(|d| lower.contains(d))
 }
 
@@ -295,7 +290,12 @@ async fn get_obscura_browser_ws_url(cdp_root: &str) -> Result<String, String> {
         let rest = &ws_url[after_scheme..];
         if let Some(path_offset) = rest.find('/') {
             let path_start = after_scheme + path_offset;
-            format!("{}{}{}", &ws_url[..after_scheme], expected_host, &ws_url[path_start..])
+            format!(
+                "{}{}{}",
+                &ws_url[..after_scheme],
+                expected_host,
+                &ws_url[path_start..]
+            )
         } else {
             ws_url.to_string()
         }
@@ -364,8 +364,22 @@ async fn fetch_text_via_cdp(ws_url: &str, url: &str) -> Result<String, String> {
     .ok_or("Target.attachToTarget 未返回 sessionId")?;
 
     // 3. 启用 domain（带 sessionId）
-    send_cdp(&mut write, &mut next_id, "Runtime.enable", &json!({}), Some(&session_id)).await;
-    send_cdp(&mut write, &mut next_id, "Page.enable", &json!({}), Some(&session_id)).await;
+    send_cdp(
+        &mut write,
+        &mut next_id,
+        "Runtime.enable",
+        &json!({}),
+        Some(&session_id),
+    )
+    .await;
+    send_cdp(
+        &mut write,
+        &mut next_id,
+        "Page.enable",
+        &json!({}),
+        Some(&session_id),
+    )
+    .await;
 
     // 4. 导航到目标页面
     let navigate_id = send_cdp(
@@ -395,8 +409,16 @@ async fn fetch_text_via_cdp(ws_url: &str, url: &str) -> Result<String, String> {
 
     // 6. 初始内容不足（可能是 JS 异步渲染，如微信公众号文章），
     //    继续监听 Page.lifecycleEvent 等待 networkIdle 信号后重新提取
-    warn!("Obscura 初始内容不足（{} 字），等待 networkIdle 后重取", text.chars().count());
-    match timeout(Duration::from_secs(10), wait_for_network_idle(&mut read, &session_id)).await {
+    warn!(
+        "Obscura 初始内容不足（{} 字），等待 networkIdle 后重取",
+        text.chars().count()
+    );
+    match timeout(
+        Duration::from_secs(10),
+        wait_for_network_idle(&mut read, &session_id),
+    )
+    .await
+    {
         Ok(Ok(())) => {}
         Ok(Err(e)) => return Err(e),
         Err(_) => {
@@ -435,7 +457,9 @@ fn is_obscura_content_sufficient(text: &str) -> bool {
 /// 等待 `Page.lifecycleEvent` 中 `networkIdle` 信号（500ms 内无新网络请求）。
 async fn wait_for_network_idle(
     read: &mut futures::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
     >,
     session_id: &str,
 ) -> Result<(), String> {
@@ -474,11 +498,15 @@ async fn wait_for_network_idle(
 /// 不存在时回退到 `document.body.innerText`（通用页面）。
 async fn evaluate_body_text(
     write: &mut futures::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
         tokio_tungstenite::tungstenite::Message,
     >,
     read: &mut futures::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
     >,
     next_id: &mut i64,
     session_id: &str,
@@ -532,7 +560,9 @@ async fn evaluate_body_text(
 /// 读取指定 id 的响应，并通过 extractor 提取字段。
 async fn read_response_with<F, T>(
     read: &mut futures::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
     >,
     expected_id: i64,
     extractor: F,
@@ -562,7 +592,9 @@ where
 /// 等待页面 `Page.domContentEventFired` 或 `Page.loadEventFired` 事件。
 async fn wait_for_page_load_event(
     read: &mut futures::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
     >,
     navigate_id: i64,
     session_id: &str,
@@ -584,7 +616,8 @@ async fn wait_for_page_load_event(
                 let method = parsed.get("method").and_then(|v| v.as_str());
                 let sid = parsed.get("sessionId").and_then(|v| v.as_str());
                 if sid == Some(session_id)
-                    && (method == Some("Page.domContentEventFired") || method == Some("Page.loadEventFired"))
+                    && (method == Some("Page.domContentEventFired")
+                        || method == Some("Page.loadEventFired"))
                 {
                     return Ok(());
                 }
@@ -599,7 +632,9 @@ async fn wait_for_page_load_event(
 /// 发送一条 CDP 消息，返回消息 id。
 async fn send_cdp(
     write: &mut futures::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
         tokio_tungstenite::tungstenite::Message,
     >,
     next_id: &mut i64,
@@ -614,7 +649,9 @@ async fn send_cdp(
         msg["sessionId"] = json!(sid);
     }
     if let Err(e) = write
-        .send(tokio_tungstenite::tungstenite::Message::Text(msg.to_string().into()))
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            msg.to_string().into(),
+        ))
         .await
     {
         warn!("发送 CDP 消息失败: {e}");
@@ -642,8 +679,10 @@ mod tests {
         println!("{}", result.chars().take(5000).collect::<String>());
         println!("=== END ===");
 
-        assert!(result.contains("GEO") && result.chars().count() > 1000,
-            "应抓到微信文章正文内容");
+        assert!(
+            result.contains("GEO") && result.chars().count() > 1000,
+            "应抓到微信文章正文内容"
+        );
     }
 
     #[tokio::test]
@@ -657,9 +696,14 @@ mod tests {
 
         let url = "https://detail.zol.com.cn/vga/s11071/";
         let result = fetch_with_obscura(url).await;
-        println!("=== Obscura 抓取结果 ===\n{result}\n=== 长度: {} ===", result.len());
+        println!(
+            "=== Obscura 抓取结果 ===\n{result}\n=== 长度: {} ===",
+            result.len()
+        );
 
-        assert!(result.contains("RTX 5070") || result.contains("5070") || result.chars().count() > 1000,
-            "Obscura 应该能抓到 ZOL 页面的显卡相关内容");
+        assert!(
+            result.contains("RTX 5070") || result.contains("5070") || result.chars().count() > 1000,
+            "Obscura 应该能抓到 ZOL 页面的显卡相关内容"
+        );
     }
 }

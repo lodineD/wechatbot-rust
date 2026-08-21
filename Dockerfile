@@ -16,6 +16,7 @@ RUN cargo build --release --features xhs-camoufox
 FROM debian:bookworm-slim
 
 WORKDIR /app
+ENV TZ=Asia/Shanghai
 
 # 安装运行时依赖（HTTPS、SSL、时区、camoufox 需要的 X11 库）
 RUN apt-get update && \

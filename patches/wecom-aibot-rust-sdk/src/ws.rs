@@ -3,13 +3,14 @@
 /// 对标 Node.js SDK src/ws.ts
 /// 负责维护与企业微信的 WebSocket 长连接，包括心跳、重连、认证、串行回复队列等。
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time;
@@ -56,6 +57,7 @@ pub struct WsConnectionManager {
     // 事件通道
     event_tx: mpsc::UnboundedSender<WsFrame>,
     event_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<WsFrame>>>>,
+    pending_acks: Arc<Mutex<HashMap<String, oneshot::Sender<WsFrame>>>>,
 }
 
 impl WsConnectionManager {
@@ -74,6 +76,7 @@ impl WsConnectionManager {
             max_missed_pong: 2,
             event_tx,
             event_rx: Arc::new(Mutex::new(Some(event_rx))),
+            pending_acks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -148,6 +151,7 @@ impl WsConnectionManager {
         let max_missed_pong = self.max_missed_pong;
         let heartbeat_interval = self.options.heartbeat_interval;
         let event_tx = self.event_tx.clone();
+        let pending_acks = self.pending_acks.clone();
 
         tokio::spawn(async move {
             Self::_receive_loop(
@@ -160,10 +164,26 @@ impl WsConnectionManager {
                 max_missed_pong,
                 heartbeat_interval,
                 &event_tx,
+                &pending_acks,
             ).await;
         });
 
         self.logger.info("Auth frame sent");
+
+        time::timeout(
+            Duration::from_millis(self.options.request_timeout),
+            async {
+                loop {
+                    if *self.state.lock().await == ConnectionState::Authenticated {
+                        break;
+                    }
+                    time::sleep(Duration::from_millis(20)).await;
+                }
+            },
+        )
+        .await
+        .map_err(|_| SdkError::Timeout("waiting for authentication ACK".to_string()))?;
+
         Ok(())
     }
 
@@ -177,6 +197,7 @@ impl WsConnectionManager {
         max_missed_pong: usize,
         heartbeat_interval: u64,
         event_tx: &mpsc::UnboundedSender<WsFrame>,
+        pending_acks: &Arc<Mutex<HashMap<String, oneshot::Sender<WsFrame>>>>,
     ) {
         // Delay the first heartbeat tick by one full interval to avoid racing with
         // the authentication frame on a freshly established connection.
@@ -199,6 +220,7 @@ impl WsConnectionManager {
                                         logger,
                                         missed_pong_count,
                                         event_tx,
+                                        pending_acks,
                                     ).await;
                                 }
                             }
@@ -272,6 +294,7 @@ impl WsConnectionManager {
         logger: &Arc<dyn Logger>,
         missed_pong_count: &Arc<AtomicUsize>,
         event_tx: &mpsc::UnboundedSender<WsFrame>,
+        pending_acks: &Arc<Mutex<HashMap<String, oneshot::Sender<WsFrame>>>>,
     ) {
         let cmd = frame.cmd.as_deref();
         let req_id = frame.headers.req_id.as_str();
@@ -280,6 +303,11 @@ impl WsConnectionManager {
         if cmd == Some(WsCmd::CALLBACK) || cmd == Some(WsCmd::EVENT_CALLBACK) {
             logger.debug(&format!("Received push message: {:?}, req_id={}", frame.body, req_id));
             let _ = event_tx.send(frame.clone());
+            return;
+        }
+
+        if let Some(tx) = pending_acks.lock().await.remove(req_id) {
+            let _ = tx.send(frame.clone());
             return;
         }
 
@@ -363,6 +391,43 @@ impl WsConnectionManager {
         };
 
         // 直接发送消息
+        if cmd == WsCmd::SEND_MSG {
+            let (ack_tx, ack_rx) = oneshot::channel();
+            self.pending_acks.lock().await.insert(req_id.to_string(), ack_tx);
+
+            if let Err(err) = self.send(&frame).await {
+                self.pending_acks.lock().await.remove(req_id);
+                return Err(err);
+            }
+
+            let ack = match time::timeout(
+                Duration::from_millis(self.options.request_timeout),
+                ack_rx,
+            ).await {
+                Ok(Ok(frame)) => frame,
+                Ok(Err(_)) => {
+                    return Err(SdkError::Internal(
+                        "active-send ACK channel closed unexpectedly".to_string(),
+                    ));
+                }
+                Err(_) => {
+                    self.pending_acks.lock().await.remove(req_id);
+                    return Err(SdkError::Timeout(format!(
+                        "waiting for active-send ACK: req_id={req_id}"
+                    )));
+                }
+            };
+
+            let errcode = ack.errcode.unwrap_or(-1);
+            if errcode != 0 {
+                return Err(SdkError::Internal(format!(
+                    "active send rejected: errcode={errcode}, errmsg={}",
+                    ack.errmsg.as_deref().unwrap_or("unknown")
+                )));
+            }
+            return Ok(ack);
+        }
+
         self.send(&frame).await?;
 
         self.logger.debug(&format!("Reply message sent, reqId: {}", req_id));
@@ -377,7 +442,13 @@ impl WsConnectionManager {
         })
     }
 
-    /// 主动断开连接
+    /// 主动断开连接（异步版本，安全在 async runtime 内调用）
+    pub async fn disconnect_async(&self) {
+        *self.is_manual_close.lock().await = true;
+        self.logger.info("WebSocket connection manually closed");
+    }
+
+    /// 主动断开连接（同步版本，不要在 async runtime 内调用）
     pub fn disconnect(&self) {
         *self.is_manual_close.blocking_lock() = true;
         self.logger.info("WebSocket connection manually closed");

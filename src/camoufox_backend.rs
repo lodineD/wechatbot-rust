@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{info, warn};
 
-use crate::xiaohongshu::{self, XhsSearchItem, UNWRAP_JS};
+use crate::xiaohongshu::{self, UNWRAP_JS, XhsSearchItem};
 
 /// Search XHS using camoufox.
 pub fn search_via_camoufox(
@@ -38,8 +38,7 @@ pub fn search_via_camoufox(
     info!("[XHS/camoufox] 使用二进制: {}", camoufox_bin.display());
 
     let profile_dir = std::env::temp_dir().join(format!("camoufox-xhs-{}", std::process::id()));
-    std::fs::create_dir_all(&profile_dir)
-        .map_err(|e| format!("创建 profile 目录失败: {e}"))?;
+    std::fs::create_dir_all(&profile_dir).map_err(|e| format!("创建 profile 目录失败: {e}"))?;
 
     let config = LaunchConfig {
         executable: camoufox_bin,
@@ -49,13 +48,16 @@ pub fn search_via_camoufox(
     };
 
     info!("[XHS/camoufox] 启动 camoufox 进程");
-    let mut launched = process::unix::spawn(&config)
-        .map_err(|e| format!("启动 camoufox 失败: {e}"))?;
+    let mut launched =
+        process::unix::spawn(&config).map_err(|e| format!("启动 camoufox 失败: {e}"))?;
 
     process::readiness::wait_for_ready(&mut launched.child, config.timeout)
         .map_err(|e| format!("等待 camoufox 就绪失败: {e}"))?;
 
-    info!("[XHS/camoufox] camoufox 已就绪 ({}ms)", start.elapsed().as_millis());
+    info!(
+        "[XHS/camoufox] camoufox 已就绪 ({}ms)",
+        start.elapsed().as_millis()
+    );
 
     // Connect to camoufox via Juggler protocol
     let transport = PipeTransport::new(launched.command_pipe, launched.response_pipe);
@@ -65,7 +67,10 @@ pub fn search_via_camoufox(
     let browser = Browser::connect(conn, root, BrowserOptions::default())
         .map_err(|e| format!("连接 camoufox 失败: {e}"))?;
 
-    info!("[XHS/camoufox] 浏览器连接成功 ({}ms)", start.elapsed().as_millis());
+    info!(
+        "[XHS/camoufox] 浏览器连接成功 ({}ms)",
+        start.elapsed().as_millis()
+    );
 
     // Create browser context
     let context = browser
@@ -108,7 +113,10 @@ pub fn search_via_camoufox(
         .new_main_frame()
         .map_err(|e| format!("创建页面失败: {e}"))?;
 
-    info!("[XHS/camoufox] 页面已创建 ({}ms)", start.elapsed().as_millis());
+    info!(
+        "[XHS/camoufox] 页面已创建 ({}ms)",
+        start.elapsed().as_millis()
+    );
 
     // Navigate to XHS homepage first (establish domain context)
     info!("[XHS/camoufox] 导航到首页建立会话上下文");
@@ -136,7 +144,8 @@ pub fn search_via_camoufox(
         Duration::from_secs(5),
     ) {
         let cstr = cval
-            .get("result").and_then(|r| r.get("value"))
+            .get("result")
+            .and_then(|r| r.get("value"))
             .or_else(|| cval.get("value"))
             .and_then(|v| v.as_str())
             .unwrap_or("(解析失败)");
@@ -154,7 +163,10 @@ pub fn search_via_camoufox(
         Duration::from_secs(15),
     );
 
-    info!("[XHS/camoufox] 页面加载完成 ({}ms)", start.elapsed().as_millis());
+    info!(
+        "[XHS/camoufox] 页面加载完成 ({}ms)",
+        start.elapsed().as_millis()
+    );
 
     // 调试：打印 camoufox 的指纹特征，判断是否被小红书识别
     if let Ok(finger) = main_frame.evaluate(
@@ -168,7 +180,8 @@ pub fn search_via_camoufox(
         Duration::from_secs(5),
     ) {
         let fstr = finger
-            .get("result").and_then(|r| r.get("value"))
+            .get("result")
+            .and_then(|r| r.get("value"))
             .or_else(|| finger.get("value"))
             .and_then(|v| v.as_str())
             .unwrap_or("(解析失败)");
@@ -231,7 +244,10 @@ pub fn search_via_camoufox(
             }
             Err(e) => {
                 if attempts % 3 == 0 {
-                    warn!("[XHS/camoufox] evaluate 失败 (尝试 {}/{}): {}", attempts, max_attempts, e);
+                    warn!(
+                        "[XHS/camoufox] evaluate 失败 (尝试 {}/{}): {}",
+                        attempts, max_attempts, e
+                    );
                 }
             }
         }
@@ -345,8 +361,7 @@ mod tests {
     #[test]
     #[ignore = "只在容器/Linux 下有意义"]
     fn probe_camoufox_binary_exists() {
-        let bin = std::env::var("CAMOUFOX_BIN")
-            .unwrap_or_else(|_| "/opt/camoufox".to_string());
+        let bin = std::env::var("CAMOUFOX_BIN").unwrap_or_else(|_| "/opt/camoufox".to_string());
         println!("CAMOUFOX_BIN = {bin}");
         assert!(
             std::path::Path::new(&bin).exists(),

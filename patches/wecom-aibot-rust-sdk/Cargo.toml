@@ -118,7 +118,7 @@ version = "0.1"
 
 [dependencies.tokio-tungstenite]
 version = "0.21"
-features = ["native-tls"]
+features = ["rustls-tls-webpki-roots"]
 
 [dependencies.urlencoding]
 version = "2.1"
